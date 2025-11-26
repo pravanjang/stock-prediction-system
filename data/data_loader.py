@@ -466,10 +466,26 @@ def main():
     
     # Validate dates
     try:
-        datetime.strptime(args.start_date, '%Y-%m-%d')
-        datetime.strptime(args.end_date, '%Y-%m-%d')
+        start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
     except ValueError as e:
         logger.error(f"Invalid date format: {e}")
+        return 1
+    
+    # Ensure start_date is before end_date
+    if start_dt >= end_dt:
+        logger.error("start_date must be before end_date")
+        return 1
+    
+    # Validate ratio arguments
+    if args.train_ratio < 0 or args.train_ratio > 1:
+        logger.error("train_ratio must be between 0 and 1")
+        return 1
+    if args.val_ratio < 0 or args.val_ratio > 1:
+        logger.error("val_ratio must be between 0 and 1")
+        return 1
+    if args.train_ratio + args.val_ratio > 1.0:
+        logger.error("train_ratio + val_ratio must not exceed 1.0")
         return 1
     
     # Determine cleaning log path
