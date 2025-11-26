@@ -211,7 +211,7 @@ class NSEMasterData:
             print(f"An error occurred while fetching historical data: {e}")
             return pd.DataFrame()
 
-if __name__ == "__main__":
+""" if __name__ == "__main__":
 
     pd.set_option("display.max_rows", None, "display.max_columns", None)
 
@@ -224,29 +224,6 @@ if __name__ == "__main__":
     end_date = datetime.now()
     start_date = end_date - timedelta(days=6)
 
-    # Symbol Search - NSE
-    print("********************  Symbol Search Utility  **********************")
-    symbols = nse.search('NIFTY BANK', exchange='NSE', match=False)
-    print(symbols)
-
-    # Symbol Search - NFO
-    symbols = nse.search('BANKNIFTY25APR', exchange='NFO', match=False)
-    print("********************  Symbol Search Utility  **********************")
-    print(symbols)
-
-    # Download Index EOD Data
-    data = nse.get_history(
-        symbol='NIFTY',
-        exchange='NSE',
-        start=start_date,
-        end=end_date,
-        interval='1d'
-    )
-    print("********************  Index EOD Data  **********************")
-    print("Symbol : NIFTY 50")
-    print(data.head(2))
-
-
     # Download Index Intraday Data
     data = nse.get_history(
         symbol='NIFTY BANK',
@@ -257,68 +234,7 @@ if __name__ == "__main__":
     )
     print("********************  Index Intraday Data  **********************")
     print("Symbol : BANKNIFTY - 1 Minute data")
-    print(data.head(2))
+    print(data.head(200)) """
 
 
-    # Download Stock (Underlying) Data
-    data = nse.get_history(
-        symbol='TCS',
-        exchange='NSE',
-        start=start_date,
-        end=end_date,
-        interval='10m'
-    )
-    print("********************  Stock Intraday Data  **********************")
-    print("Symbol : TCS - 10 Minute data")
-    print(data.head(2))
-
-
-    # Download Index Futures Data
-    data = nse.get_history(
-        symbol='NIFTY25APRFUT',
-        exchange='NFO',
-        start=start_date,
-        end=end_date,
-        interval='1h'
-    )
-    print("********************  Index Futures Data  **********************")
-    print("Symbol : Nifty April Futures - 1 Hour data")
-    print(data.head(2))
-
-    # Download Stock Futures Data
-    data = nse.get_history(
-        symbol='RELIANCE25APRFUT',
-        exchange='NFO',
-        start=start_date,
-        end=end_date,
-        interval='1h'
-    )
-    print("********************  Stock Futures Data  **********************")
-    print("Symbol : Reliance April Futures - 1 Hour data")
-    print(data.head(2))
-
-
-    # Download Index Options Data
-    data = nse.get_history(
-        symbol='BANKNIFTY25APR50000PE',
-        exchange='NFO',
-        start=start_date,
-        end=end_date,
-        interval='5m'
-    )
-    print("********************  Index Options Data  **********************")
-    print("Symbol : Banknifty PE Options - 5 Minute data")
-    print(data.head(2))
-
-
-    # Download Stock Options Data
-    data = nse.get_history(
-        symbol='TCS25MAY3000CE',
-        exchange='NFO',
-        start=start_date,
-        end=end_date,
-        interval='5m'
-    )
-    print("********************  Stock Options Data  **********************")
-    print("Symbol : TCS CE Option - 5 Minute data")
-    print(data.head(2))
+    
