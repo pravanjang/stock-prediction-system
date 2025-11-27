@@ -21,7 +21,8 @@ class SharekhanClient(BrokerClient):
         self.state = config.get('state', 12345)  # Hypothetical additional parameter
         
         # Placeholder for the actual API object
-        self.api: SharekhanConnect = SharekhanConnect()
+        self.api: SharekhanConnect = SharekhanConnect(api_key=self.api_key, state=self.state)
+        logger.info("Initialized SharekhanClient with provided configuration.")
 
     def authenticate(self):
         """
@@ -34,7 +35,6 @@ class SharekhanClient(BrokerClient):
                 raise ValueError("Missing Sharekhan authentication parameters.")
             else:
                 logger.info("Proceeding for Sharekhan authentication.")
-                self.api = SharekhanConnect( api_key=self.api_key, state=self.state)
                 # get the session using request token and secret key
                 self.session = self.api.generate_session_without_versionId(self.request_token, self.secret_key)
                 logger.info("Authentication successful.")

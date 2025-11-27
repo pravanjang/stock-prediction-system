@@ -49,7 +49,7 @@ def fetch_banknifty_data(
         end_date: End date in YYYY-MM-DD format
         interval: Data interval (default: 15m)
         source: Data source - 'yfinance' or 'csv'
-        csv_path: Path to local CSV file (required if source is 'csv')
+        csv_path: Path to local CSV file or directory of CSV files (required if source is 'csv')
     
     Returns:
         DataFrame with OHLCV data indexed by datetime
@@ -150,7 +150,42 @@ def _fetch_intraday_chunks(start_dt: datetime, end_dt: datetime, interval: str) 
 
 
 def _fetch_from_csv(csv_path: str) -> pd.DataFrame:
-    """Load data from local CSV file."""
+    """Load data from local CSV file or directory of CSV files."""
+    if os.path.isdir(csv_path):
+        logger.info(f"Loading data from directory: {csv_path}")
+        all_files = [os.path.join(csv_path, f) for f in os.listdir(csv_path) if f.endswith('.csv')]
+        if not all_files:
+             raise FileNotFoundError(f"No CSV files found in directory: {csv_path}")
+        
+        dfs = []
+        for f in all_files:
+            try:
+                df = _load_and_standardize_csv(f)
+                if not df.empty:
+                    dfs.append(df)
+            except Exception as e:
+                logger.warning(f"Skipping file {f} due to error: {e}")
+        
+        if not dfs:
+            logger.warning("No valid data loaded from CSV files.")
+            return pd.DataFrame()
+            
+        combined_df = pd.concat(dfs)
+        # Remove duplicates based on index (datetime)
+        duplicates_count = combined_df.index.duplicated().sum()
+        if duplicates_count > 0:
+            logger.info(f"Removing {duplicates_count} duplicate timestamps from combined data")
+            combined_df = combined_df[~combined_df.index.duplicated(keep='last')]
+            
+        combined_df = combined_df.sort_index()
+        logger.info(f"Successfully loaded and combined {len(combined_df)} rows from {len(dfs)} CSV files")
+        return combined_df
+    else:
+        return _load_and_standardize_csv(csv_path)
+
+
+def _load_and_standardize_csv(csv_path: str) -> pd.DataFrame:
+    """Helper to load and standardize a single CSV file."""
     logger.info(f"Loading data from CSV: {csv_path}")
     
     if not os.path.exists(csv_path):
@@ -188,12 +223,11 @@ def _fetch_from_csv(csv_path: str) -> pd.DataFrame:
     required_columns = ['open', 'high', 'low', 'close', 'volume']
     for col in required_columns:
         if col not in df.columns:
-            logger.warning(f"Column '{col}' not found in CSV. Setting to NaN.")
+            logger.warning(f"Column '{col}' not found in CSV {csv_path}. Setting to NaN.")
             df[col] = float('nan')
     
     df = df[required_columns]
     
-    logger.info(f"Successfully loaded {len(df)} rows from CSV")
     return df
 
 
