@@ -1,0 +1,19 @@
+active_broker: zerodha
+
+brokers:
+  zerodha:
+    api_key: "YOUR_API_KEY"
+    api_secret: "YOUR_API_SECRET"
+    access_token: "" # Optional: Fill this if you have a valid access token
+
+  sharekhan:
+    api_key: "YOUR_API_KEY"
+    vendor_key: "YOUR_VENDOR_KEY"
+    user_id: "YOUR_USER_ID"
+    password: "YOUR_PASSWORD"
+    access_token: ""
+
+  interactive_brokers:
+    host: "127.0.0.1"
+    port: 7497 # 7497 for paper trading, 7496 for live
+    client_id: 1
