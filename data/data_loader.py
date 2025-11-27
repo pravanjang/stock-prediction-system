@@ -206,7 +206,22 @@ def _load_and_standardize_csv(csv_path: str) -> pd.DataFrame:
         # Assume first column is datetime
         datetime_col = df.columns[0]
     
-    df[datetime_col] = pd.to_datetime(df[datetime_col])
+    # Handle specific datetime format: "Mon Feb 03 2025 12:00:00 GMT+0530 (India Standard Time)"
+    # We extract the part before "GMT" to parse it, then localize
+    try:
+        # Check if the column contains the problematic format
+        sample_val = str(df[datetime_col].iloc[0])
+        if 'GMT' in sample_val and '(' in sample_val:
+            # Extract "Mon Feb 03 2025 12:00:00" part
+            # Format: %a %b %d %Y %H:%M:%S
+            df[datetime_col] = df[datetime_col].apply(lambda x: str(x).split(' GMT')[0])
+            df[datetime_col] = pd.to_datetime(df[datetime_col], format='%a %b %d %Y %H:%M:%S')
+        else:
+            df[datetime_col] = pd.to_datetime(df[datetime_col])
+    except Exception as e:
+        logger.warning(f"Standard parsing failed, trying flexible parsing: {e}")
+        df[datetime_col] = pd.to_datetime(df[datetime_col], errors='coerce')
+
     df = df.set_index(datetime_col)
     df.index.name = 'datetime'
     
