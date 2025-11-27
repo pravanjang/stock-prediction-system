@@ -1,4 +1,4 @@
-active_broker: zerodha
+active_broker: sharekhan
 
 brokers:
   zerodha:
@@ -8,10 +8,8 @@ brokers:
 
   sharekhan:
     api_key: "YOUR_API_KEY"
-    vendor_key: "YOUR_VENDOR_KEY"
-    user_id: "YOUR_USER_ID"
-    password: "YOUR_PASSWORD"
-    access_token: ""
+    secret_key: "YOUR_SECRET_KEY"
+    request_token: "request token received after login"
 
   interactive_brokers:
     host: "127.0.0.1"

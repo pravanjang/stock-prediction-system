@@ -1,4 +1,5 @@
 import logging
+import os
 import pandas as pd
 from datetime import datetime
 from .base import BrokerClient
@@ -96,14 +97,41 @@ class SharekhanClient(BrokerClient):
                     df['date'] = pd.to_datetime(df['tradeDate'].astype(str) + ' ' + df['tradeTime'].astype(str))
                     df.set_index('date', inplace=True)
                     
-                    # Rename columns to standard format if needed
-                    # Assuming columns are: open, high, low, close, volume
-                    # We normalize to lowercase to be safe
-                    df.rename(columns=str.lower, inplace=True)
+                    # Rename columns based on user specification
+                    # API returns: open, high, low, close, qty, tradedValue
+                    rename_map = {
+                        'qty': 'volume',
+                        'tradedValue': 'value'
+                    }
+                    df.rename(columns=rename_map, inplace=True)
                     
                     required_cols = ['open', 'high', 'low', 'close', 'volume']
                     if all(col in df.columns for col in required_cols):
-                        df = df[required_cols]
+                        # Return standard columns plus 'value' if available
+                        cols_to_return = list(required_cols)
+                        if 'value' in df.columns:
+                            cols_to_return.append('value')
+                        
+                        df = df[cols_to_return]
+
+                        # Save to raw folder
+                        try:
+                            # Go up two levels from current file: data/brokers/ -> data/
+                            raw_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'raw')
+                            os.makedirs(raw_dir, exist_ok=True)
+                            
+                            # Sanitize symbol for filename
+                            safe_symbol = symbol.replace(':', '_').replace('/', '_')
+                            # Create a filename with symbol, interval and timestamp
+                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                            filename = f"sharekhan_{safe_symbol}_{interval}_{timestamp}.csv"
+                            file_path = os.path.join(raw_dir, filename)
+                            
+                            df.to_csv(file_path)
+                            logger.info(f"Saved raw data to {file_path}")
+                        except Exception as save_err:
+                            logger.error(f"Failed to save raw data: {save_err}")
+                        
                         return df
                     else:
                         logger.error(f"Missing required columns in Sharekhan data. Available: {df.columns}")
