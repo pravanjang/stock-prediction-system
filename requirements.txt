@@ -6,3 +6,5 @@ requests>=2.28.0
 kiteconnect>=3.9.0
 pyyaml>=6.0
 ib_insync>=0.9.86
+shareconnect>=1.0.0
+websocket

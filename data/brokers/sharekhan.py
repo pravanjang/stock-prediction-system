@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import datetime
 from .base import BrokerClient
 
+from SharekhanApi.sharekhanConnect import SharekhanConnect
+
 # Note: Sharekhan does not have a single standard public Python package like 'kiteconnect'.
 # This implementation assumes a generic REST API structure or a hypothetical 'sharekhan_api' wrapper.
 # In a real scenario, you would replace this with the specific library calls or requests to their endpoints.
@@ -12,14 +14,13 @@ logger = logging.getLogger(__name__)
 
 class SharekhanClient(BrokerClient):
     def __init__(self, config: dict):
+        self.secret_key = config.get('secret_key')
         self.api_key = config.get('api_key')
-        self.vendor_key = config.get('vendor_key') # Sharekhan often uses vendor keys
-        self.user_id = config.get('user_id')
-        self.password = config.get('password')
-        self.access_token = config.get('access_token')
+        self.request_token = config.get('request_token')
+        self.state = config.get('state', 12345)  # Hypothetical additional parameter
         
         # Placeholder for the actual API object
-        self.api = None 
+        self.api: SharekhanConnect = SharekhanConnect()
 
     def authenticate(self):
         """
@@ -27,16 +28,19 @@ class SharekhanClient(BrokerClient):
         """
         logger.info("Authenticating with Sharekhan...")
         try:
-            # Hypothetical authentication flow
-            # from sharekhan_api import SharekhanAPI
-            # self.api = SharekhanAPI(api_key=self.api_key, vendor_key=self.vendor_key)
-            # self.access_token = self.api.login(self.user_id, self.password)
-            
-            if not self.access_token:
-                logger.warning("Sharekhan authentication not implemented. Please provide a valid access_token in config.")
-                # In a real implementation, you would perform the login here.
+            if not self.request_token or not self.api_key or not self.secret_key:
+                logger.warning("Sharekhan authentication needs request token, api key and secret key... ")
+                raise ValueError("Missing Sharekhan authentication parameters.")
             else:
-                logger.info("Using provided access token for Sharekhan.")
+                logger.info("Proceeding for Sharekhan authentication.")
+                self.api = SharekhanConnect( api_key=self.api_key, state=self.state)
+                # get the session using request token and secret key
+                self.session = self.api.generate_session_without_versionId(self.request_token, self.secret_key)
+                logger.info("Authentication successful.")
+                # get access token
+                self.access_token= self.api.get_access_token(apiKey=self.api_key, encstr=self.session, state=self.state)
+
+                self.api = SharekhanConnect( api_key=self.api_key, access_token=self.access_token, state=self.state)                
                 
         except Exception as e:
             logger.error(f"Sharekhan authentication failed: {e}")
@@ -46,27 +50,68 @@ class SharekhanClient(BrokerClient):
         """
         Fetch historical data from Sharekhan.
         """
-        logger.info(f"Fetching data for {symbol} from Sharekhan (Placeholder implementation)")
+        logger.info(f"Fetching data for {symbol} from Sharekhan")
         
         # Map intervals
         interval_map = {
-            '1m': '1minute',
-            '5m': '5minute',
-            '15m': '15minute',
-            '30m': '30minute',
-            '60m': '60minute',
-            '1d': 'daily'
+            '1-minute': '1minute',
+            '5-minute': '5minute',
+            '15-minute': '15minute',
+            '30-minute': '30minute',
+            '60-minute': '60minute',
+            'daily': 'daily'
         }
         s_interval = interval_map.get(interval, 'daily')
 
         try:
-            # Hypothetical API call
-            # data = self.api.get_history(exchange='NSE', symbol=symbol, start=start_date, end=end_date, interval=s_interval)
+            # TODO: Implement symbol to scripcode mapping
+            # For now, using hardcoded values as per user snippet
+            exchange = "NC" 
+            scripcode = 26009 
             
-            # Since we don't have the actual library, we return an empty DataFrame or mock data.
-            # To make this useful, one would need to install the specific Sharekhan library provided by them.
+            if self.api is None:
+                self.authenticate()
+
+            # call the historical data method from Sharekhan API
+            data = self.api.historicaldata(exchange, scripcode, s_interval)
             
-            logger.warning("Sharekhan fetch_historical_data is a placeholder. No actual data fetched.")
+            # Check if data is valid and extract the list of candles
+            candles = []
+            if isinstance(data, dict):
+                if 'response' in data and 'data' in data['response']:
+                    candles = data['response']['data']
+                elif 'data' in data:
+                    candles = data['data']
+                else:
+                    # Fallback if the dict itself is the data or unknown format
+                    logger.warning(f"Unknown data format from Sharekhan: {data}")
+                    return pd.DataFrame()
+            elif isinstance(data, list):
+                candles = data
+            
+            if candles:
+                df = pd.DataFrame(candles)
+                # Ensure required columns exist
+                if 'tradeDate' in df.columns and 'tradeTime' in df.columns:
+                    df['date'] = pd.to_datetime(df['tradeDate'].astype(str) + ' ' + df['tradeTime'].astype(str))
+                    df.set_index('date', inplace=True)
+                    
+                    # Rename columns to standard format if needed
+                    # Assuming columns are: open, high, low, close, volume
+                    # We normalize to lowercase to be safe
+                    df.rename(columns=str.lower, inplace=True)
+                    
+                    required_cols = ['open', 'high', 'low', 'close', 'volume']
+                    if all(col in df.columns for col in required_cols):
+                        df = df[required_cols]
+                        return df
+                    else:
+                        logger.error(f"Missing required columns in Sharekhan data. Available: {df.columns}")
+                        return pd.DataFrame()
+                else:
+                    logger.error("Sharekhan data missing tradeDate or tradeTime")
+                    return pd.DataFrame()
+            
             return pd.DataFrame()
 
         except Exception as e:
