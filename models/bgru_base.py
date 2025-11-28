@@ -236,15 +236,29 @@ class BGRUPredictor:
         if not available_cols:
             raise ValueError("No OHLCV columns found in DataFrame")
         
+        empty_cols = []
         for col in available_cols:
             rolling_mean = df[col].rolling(window=window, min_periods=1).mean()
             rolling_std = df[col].rolling(window=window, min_periods=1).std()
             # Avoid division by zero
             rolling_std = rolling_std.replace(0, MIN_STD)
-            df[col] = (df[col] - rolling_mean) / rolling_std
+            normalized = (df[col] - rolling_mean) / rolling_std
+            normalized = normalized.replace([np.inf, -np.inf], np.nan)
+            if normalized.isna().all():
+                empty_cols.append(col)
+                df[col] = 0.0
+                continue
+            normalized = normalized.ffill().bfill().fillna(0.0)
+            df[col] = normalized
         
-        # Handle any remaining NaN values
-        df = df.ffill().bfill()
+        if empty_cols:
+            self.logger.warning(
+                "Found columns with no valid values after normalization: %s. Filling with zeros.",
+                empty_cols
+            )
+        
+        # Handle any remaining NaN values outside OHLCV columns
+        df = df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
         
         return df
     
@@ -271,12 +285,27 @@ class BGRUPredictor:
         # Normalize data
         df_norm = self.normalize_data(df, method='rolling_zscore', window=100)
         
-        # Extract OHLCV features
-        features = df_norm[ohlcv_cols].values
+        # Extract OHLCV features and ensure they are finite
+        features = df_norm[ohlcv_cols].values.astype(np.float32, copy=False)
+        invalid_features = ~np.isfinite(features)
+        if invalid_features.any():
+            invalid_count = int(invalid_features.sum())
+            self.logger.warning(
+                "Detected %d non-finite feature values. Replacing them with zeros before training.",
+                invalid_count
+            )
+            features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Extract targets (if available)
         if 'target' in df.columns:
-            targets = df['target'].values
+            targets = df['target'].values.astype(np.float32, copy=False)
+            if np.isnan(targets).any():
+                raise ValueError("Target column contains NaN values. Please regenerate the dataset.")
+            if np.logical_or(targets < 0, targets > 1).any():
+                unique_vals = np.unique(targets)
+                raise ValueError(
+                    f"Target column must be binary in [0, 1]. Found values: {unique_vals}"
+                )
         else:
             targets = None
         
