@@ -6,6 +6,10 @@ __pycache__/
 # Processed data (generated files)
 data/processed/
 
+# Model checkpoints and logs (generated files)
+models/checkpoints/
+models/logs/
+
 # C extensions
 *.so
 
