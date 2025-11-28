@@ -47,55 +47,68 @@ class BGRUModel(nn.Module):
         input_dim: int = 5,
         hidden_dim: int = 128,
         num_layers: int = 2,
-        dropout: float = 0.3
+        dropout: float = 0.3,
+        use_attention: bool = True
     ):
         """
         Initialize the BGRU model.
         
         Args:
-            input_dim: Number of input features (default: 5 for OHLCV)
-            hidden_dim: Hidden dimension for first BGRU layer (default: 128)
-            num_layers: Number of GRU layers (default: 2)
-            dropout: Dropout rate for GRU layers (default: 0.3)
+            input_dim: Number of input features (5 for OHLCV)
+            hidden_dim: Hidden dimension size
+            num_layers: Number of GRU layers
+            dropout: Dropout probability
+            use_attention: Whether to use attention mechanism
         """
-        super().__init__()
+        super(BGRUModel, self).__init__()
         
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
         
-        # First BGRU layer: 128 units bidirectional
+        # For daily data, can use deeper network with self attention
+        # for intraday, simpler model without attention
+        self.use_attention = use_attention
+        
+        # First BGRU layer
         self.gru1 = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=1,
-            batch_first=True,
+            input_dim, hidden_dim, 
+            batch_first=True, 
             bidirectional=True,
-            dropout=0
+            dropout=dropout if num_layers > 1 else 0
         )
         self.dropout1 = nn.Dropout(dropout)
         
-        # Second BGRU layer: 64 units bidirectional
-        # Input is hidden_dim * 2 (bidirectional output from first layer)
+        # Second BGRU layer
         self.gru2 = nn.GRU(
-            input_size=hidden_dim * 2,
-            hidden_size=hidden_dim // 2,  # 64 units
-            num_layers=1,
-            batch_first=True,
+            hidden_dim * 2,  # *2 because bidirectional
+            hidden_dim // 2, 
+            batch_first=True, 
             bidirectional=True,
-            dropout=0
+            dropout=dropout if num_layers > 1 else 0
         )
         self.dropout2 = nn.Dropout(dropout)
         
-        # Dense layer: 32 units with ReLU
-        # Input is (hidden_dim // 2) * 2 = 128 (bidirectional output from second layer)
-        self.fc1 = nn.Linear(hidden_dim, 32)
-        self.relu = nn.ReLU()
-        self.dropout3 = nn.Dropout(0.2)
+        # Attention mechanism (optional)
+        if self.use_attention:
+            self.attention = nn.MultiheadAttention(
+                embed_dim=hidden_dim,  # hidden_dim from gru2 (*2 for bidirectional = hidden_dim)
+                num_heads=4,
+                dropout=dropout,
+                batch_first=True
+            )
         
-        # Output layer: 1 unit with Sigmoid
-        self.fc2 = nn.Linear(32, 1)
+        # Dense layers
+        self.fc1 = nn.Linear(hidden_dim, 64)
+        self.relu = nn.ReLU()
+        self.dropout3 = nn.Dropout(0.3)
+        
+        self.fc2 = nn.Linear(64, 32)
+        self.relu2 = nn.ReLU()
+        self.dropout4 = nn.Dropout(0.2)
+        
+        self.fc3 = nn.Linear(32, 1)
         self.sigmoid = nn.Sigmoid()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -113,19 +126,30 @@ class BGRUModel(nn.Module):
         out = self.dropout1(out)
         
         # Second BGRU layer
-        out, _ = self.gru2(out)
+        out, _ = self.gru2(out)  # [batch, seq_len, hidden_dim]
         out = self.dropout2(out)
         
-        # Take the output from the last time step
-        out = out[:, -1, :]
+        # Apply attention if enabled
+        if self.use_attention:
+            # Self-attention over sequence
+            attn_out, attn_weights = self.attention(out, out, out)
+            # Take last time step after attention
+            out = attn_out[:, -1, :]  # [batch, hidden_dim]
+        else:
+            # Without attention, just take last time step
+            out = out[:, -1, :]
         
         # Dense layers
         out = self.fc1(out)
         out = self.relu(out)
         out = self.dropout3(out)
         
-        # Output layer
         out = self.fc2(out)
+        out = self.relu2(out)
+        out = self.dropout4(out)
+        
+        # Output layer
+        out = self.fc3(out)
         out = self.sigmoid(out)
         
         return out
@@ -442,7 +466,7 @@ class BGRUPredictor:
         # Early stopping
         best_val_loss = float('inf')
         best_val_acc = 0.0
-        patience = 10
+        patience = 20
         patience_counter = 0
         
         # Training history
