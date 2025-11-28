@@ -23,6 +23,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
+# Constants
+MIN_STD = 1e-8  # Minimum standard deviation to avoid division by zero
+
 
 class BGRUModel(nn.Module):
     """
@@ -237,7 +240,7 @@ class BGRUPredictor:
             rolling_mean = df[col].rolling(window=window, min_periods=1).mean()
             rolling_std = df[col].rolling(window=window, min_periods=1).std()
             # Avoid division by zero
-            rolling_std = rolling_std.replace(0, 1e-8)
+            rolling_std = rolling_std.replace(0, MIN_STD)
             df[col] = (df[col] - rolling_mean) / rolling_std
         
         # Handle any remaining NaN values
@@ -374,11 +377,21 @@ class BGRUPredictor:
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
         
-        # Loss function
+        # Loss function - using BCELoss since model has sigmoid output
+        # For class weights, we use pos_weight with BCELoss using reduction='none' and manual weighting
         if class_weights is not None:
-            # Use weighted BCE loss for imbalanced data
+            # Calculate positive weight for imbalanced data
             pos_weight = class_weights[1] / class_weights[0]
-            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(self.device))
+            
+            def weighted_bce_loss(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+                """Weighted BCE loss for handling class imbalance."""
+                # Apply weights: higher weight for positive class
+                weights = torch.ones_like(targets)
+                weights[targets == 1] = pos_weight
+                bce = nn.functional.binary_cross_entropy(outputs, targets, reduction='none')
+                return (bce * weights).mean()
+            
+            criterion = weighted_bce_loss
         else:
             criterion = nn.BCELoss()
         
@@ -653,17 +666,27 @@ class BGRUPredictor:
         
         Args:
             path: Path to the model checkpoint
+        
+        Note:
+            Uses weights_only=False to load configuration and training history.
+            Only load checkpoints from trusted sources.
         """
         if not os.path.exists(path):
             raise FileNotFoundError(f"Checkpoint not found: {path}")
         
+        # Load checkpoint - weights_only=False needed for config/history dicts
+        # Only load checkpoints from trusted sources
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
-        # Update model configuration
-        self.input_dim = checkpoint.get('input_dim', self.input_dim)
-        self.hidden_dim = checkpoint.get('hidden_dim', self.hidden_dim)
-        self.num_layers = checkpoint.get('num_layers', self.num_layers)
-        self.dropout = checkpoint.get('dropout', self.dropout)
+        # Validate checkpoint structure
+        if 'model_state_dict' not in checkpoint:
+            raise ValueError("Invalid checkpoint: missing 'model_state_dict'")
+        
+        # Update model configuration with validation
+        self.input_dim = int(checkpoint.get('input_dim', self.input_dim))
+        self.hidden_dim = int(checkpoint.get('hidden_dim', self.hidden_dim))
+        self.num_layers = int(checkpoint.get('num_layers', self.num_layers))
+        self.dropout = float(checkpoint.get('dropout', self.dropout))
         
         # Build model with loaded configuration
         self.build_model()
