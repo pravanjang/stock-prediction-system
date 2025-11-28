@@ -349,6 +349,31 @@ def clean_data(df: pd.DataFrame, log_file: Optional[str] = None) -> pd.DataFrame
     return df
 
 
+def create_target_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Creates binary directional labels:
+    - Label = 1 if close(t+1) > close(t) [UP]
+    - Label = 0 if close(t+1) <= close(t) [DOWN]
+    
+    Handles edge cases (equal prices, gaps at market open)
+    Adds column 'target' to dataframe
+    Returns: df with target column
+    """
+    df = df.copy()
+    
+    # Calculate target
+    # Shift(-1) gets the next row's value
+    # We compare next close with current close
+    df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
+    
+    # The last row will have an invalid target because there is no t+1.
+    # We remove the last row as the target is unknown.
+    df = df.iloc[:-1]
+    
+    logger.info(f"Created target labels. Class distribution: {df['target'].value_counts().to_dict()}")
+    return df
+
+
 def split_data(
     df: pd.DataFrame,
     train_ratio: float = 0.7,
@@ -444,11 +469,13 @@ def save_splits(
         },
         'missing_values': {
             col: int(all_data[col].isna().sum()) 
-            for col in ['open', 'high', 'low', 'close', 'volume']
-            if col in all_data.columns
+            for col in all_data.columns
         },
         'generated_at': datetime.now().isoformat()
     }
+    
+    if 'target' in all_data.columns:
+        stats['target_distribution'] = all_data['target'].value_counts().to_dict()
     
     with open(output_path / 'data_stats.json', 'w') as f:
         json.dump(stats, f, indent=2)
@@ -559,6 +586,13 @@ def main():
         
         if df.empty:
             logger.error("No data remaining after cleaning.")
+            return 1
+            
+        # Create target labels
+        df = create_target_labels(df)
+        
+        if df.empty:
+            logger.error("No data remaining after creating target labels.")
             return 1
         
         # Split data
