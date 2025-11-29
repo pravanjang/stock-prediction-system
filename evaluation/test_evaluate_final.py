@@ -49,7 +49,9 @@ def create_synthetic_ohlcv_data(n_samples: int = 200) -> pd.DataFrame:
     """Create synthetic OHLCV data for backtesting."""
     np.random.seed(42)
     
-    dates = pd.date_range('2024-01-01 09:15', periods=n_samples, freq='5min')
+    # Use relative date calculation for flexibility
+    start_date = pd.Timestamp.now().normalize() - pd.Timedelta(days=n_samples // 78)  # ~78 candles per day at 5min
+    dates = pd.date_range(start_date.replace(hour=9, minute=15), periods=n_samples, freq='5min')
     
     # Simulate price movement
     base_price = 45000

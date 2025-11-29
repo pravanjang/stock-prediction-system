@@ -47,6 +47,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Constants
+MIN_STD = 1e-8  # Minimum standard deviation to avoid division by zero
+
 
 # =============================================================================
 # Data Loading Functions
@@ -621,29 +624,29 @@ def backtest_trading_strategy(
     
     # Profit factor
     gross_profit = winning_trades['net_pnl'].sum() if len(winning_trades) > 0 else 0.0
-    gross_loss = abs(losing_trades['net_pnl'].sum()) if len(losing_trades) > 0 else 0.0001
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+    gross_loss = abs(losing_trades['net_pnl'].sum()) if len(losing_trades) > 0 else MIN_STD
+    profit_factor = gross_profit / gross_loss if gross_loss > MIN_STD else float('inf')
     
     # Return calculations
     total_return = sum(t['net_return'] for t in trades) * 100
     
     # Annualized return (assuming ~252 trading days per year, ~6 trades per day)
     avg_daily_trades = 6  # approximate for intraday
-    trading_days = total_trades / avg_daily_trades
+    trading_days = total_trades / avg_daily_trades if total_trades > 0 else 1
     annualized_return = ((1 + total_return / 100) ** (252 / max(trading_days, 1)) - 1) * 100
     
     # Risk metrics
     returns = trades_df['net_return'].values
     avg_return = np.mean(returns)
-    std_return = np.std(returns) if len(returns) > 1 else 0.0001
+    std_return = np.std(returns) if len(returns) > 1 else MIN_STD
     
     # Sharpe ratio (annualized, assuming 252 trading days)
-    sharpe_ratio = (avg_return / std_return) * np.sqrt(252 * avg_daily_trades) if std_return > 0 else 0.0
+    sharpe_ratio = (avg_return / std_return) * np.sqrt(252 * avg_daily_trades) if std_return > MIN_STD else 0.0
     
     # Sortino ratio (using downside deviation)
     negative_returns = returns[returns < 0]
-    downside_std = np.std(negative_returns) if len(negative_returns) > 1 else 0.0001
-    sortino_ratio = (avg_return / downside_std) * np.sqrt(252 * avg_daily_trades) if downside_std > 0 else 0.0
+    downside_std = np.std(negative_returns) if len(negative_returns) > 1 else MIN_STD
+    sortino_ratio = (avg_return / downside_std) * np.sqrt(252 * avg_daily_trades) if downside_std > MIN_STD else 0.0
     
     # Average holding time (assuming each trade is held for 1 candle period)
     avg_holding_time = 1  # 1 candle period
