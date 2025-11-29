@@ -13,14 +13,22 @@ This module provides feature selection and importance analysis:
 import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
+
+from models.bgru_base import BGRUPredictor
 
 # Configure logging
 logging.basicConfig(
@@ -514,7 +522,6 @@ def load_model(model_path: str) -> Any:
     
     # Try loading as BGRUPredictor
     try:
-        from models.bgru_base import BGRUPredictor
         model = BGRUPredictor()
         model.load_model(model_path)
         logger.info(f"Loaded BGRUPredictor from {model_path}")
