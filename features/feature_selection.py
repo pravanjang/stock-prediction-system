@@ -238,11 +238,11 @@ def calculate_vif(
             # Add constant term
             X_other = np.column_stack([np.ones(len(y)), X_other])
             
-            # Calculate R-squared using OLS
+            # Calculate R-squared using OLS with least squares
             # R^2 = 1 - (SS_res / SS_tot)
             try:
-                # Use pseudo-inverse for numerical stability
-                coeffs = np.linalg.lstsq(X_other, y, rcond=None)[0]
+                # Use lstsq with explicit rcond for numerical stability
+                coeffs = np.linalg.lstsq(X_other, y, rcond=1e-15)[0]
                 y_pred = X_other @ coeffs
                 
                 ss_res = np.sum((y - y_pred) ** 2)

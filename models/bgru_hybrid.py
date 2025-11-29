@@ -527,16 +527,20 @@ class HybridBGRUModel:
         if len(X_seq_train) == 0 or len(X_seq_val) == 0:
             raise ValueError("Insufficient data for training.")
         
-        # Build model with correct static features dimension
+        # Validate and update static features dimension before building model
+        actual_static_dim = X_static_train.shape[1]
+        if self.n_static_features != actual_static_dim:
+            self.logger.info(
+                f"Updating n_static_features from {self.n_static_features} "
+                f"to {actual_static_dim} based on data"
+            )
+            self.n_static_features = actual_static_dim
+        
+        # Build model with correct dimensions
         if self.model is None:
             self.build_model()
         if self.model is None:
             raise RuntimeError("Model initialization failed.")
-        
-        # Update model's static features dimension if needed
-        if X_static_train.shape[1] != self.model.n_static_features:
-            self.n_static_features = X_static_train.shape[1]
-            self.build_model()
         
         # Log class distribution and compute weights
         self._log_class_distribution(y_train, split='Train')
@@ -887,6 +891,8 @@ class HybridBGRUModel:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Checkpoint not found: {path}")
         
+        # Load checkpoint - weights_only=False is required to load config dicts
+        # Only load checkpoints from trusted sources (locally saved models)
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         if 'model_state_dict' not in checkpoint:
