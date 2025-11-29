@@ -771,6 +771,32 @@ def setup_logging(log_dir: str = 'models/logs/') -> None:
         ]
     )
 
+def check_class_distribution(df):
+    """Check target distribution"""
+    import pandas as pd
+    
+    print("\n" + "="*60)
+    print("CLASS DISTRIBUTION ANALYSIS")
+    print("="*60)
+    
+    # Check target distribution
+    target_counts = df['target'].value_counts()
+    print(f"\nTarget Distribution:")
+    print(f"  Class 0 (DOWN): {target_counts[0]} ({target_counts[0]/len(df)*100:.2f}%)")
+    print(f"  Class 1 (UP):   {target_counts[1]} ({target_counts[1]/len(df)*100:.2f}%)")
+    
+    # Calculate class weights
+    from sklearn.utils.class_weight import compute_class_weight
+    class_weights = compute_class_weight('balanced', 
+                                         classes=np.unique(df['target']), 
+                                         y=df['target'])
+    print(f"\nRecommended Class Weights:")
+    print(f"  Class 0: {class_weights[0]:.4f}")
+    print(f"  Class 1: {class_weights[1]:.4f}")
+    print("="*60 + "\n")
+    
+    return class_weights
+
 
 def main():
     """Main entry point for CLI execution."""
@@ -857,6 +883,9 @@ def main():
         
         logger.info(f"Loading training data from {train_path}")
         train_df = pd.read_csv(train_path, index_col=0, parse_dates=True)
+
+        class_weights = check_class_distribution(train_df)
+        logger.info(f"Using class weights: {class_weights}")
         
         logger.info(f"Loading validation data from {val_path}")
         val_df = pd.read_csv(val_path, index_col=0, parse_dates=True)
