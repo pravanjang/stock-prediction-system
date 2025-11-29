@@ -312,14 +312,23 @@ class OptunaObjective:
             # Setup loss function
             if self.class_weights is not None:
                 class_weights_device = self.class_weights.to(self.device)
-                neg_weight = torch.clamp(class_weights_device[0], min=MIN_STD)
-                pos_weight = class_weights_device[1] / neg_weight
+                class_0_weight = torch.clamp(class_weights_device[0], min=MIN_STD)
+                # Compute relative weight for class 1 samples
+                class_1_relative_weight = class_weights_device[1] / class_0_weight
                 
-                def weighted_bce_loss(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-                    weights = torch.ones_like(targets)
-                    weights[targets == 1] = pos_weight
+                def weighted_bce_loss(
+                    outputs: torch.Tensor,
+                    targets: torch.Tensor,
+                    pos_weight: torch.Tensor = class_1_relative_weight
+                ) -> torch.Tensor:
+                    # Use where for efficient weight computation
+                    sample_weights = torch.where(
+                        targets == 1,
+                        pos_weight,
+                        torch.ones(1, device=targets.device, dtype=targets.dtype)
+                    )
                     bce = nn.functional.binary_cross_entropy(outputs, targets, reduction='none')
-                    return (bce * weights).mean()
+                    return (bce * sample_weights).mean()
                 
                 criterion = weighted_bce_loss
             else:
@@ -382,11 +391,10 @@ class OptunaObjective:
 
 def objective_function(trial: Trial) -> float:
     """
-    Standalone objective function signature for documentation.
+    Standalone objective function for Optuna optimization.
     
-    Note: This function is a wrapper that requires a configured
-    OptunaObjective instance. Use the OptunaObjective class
-    for actual optimization.
+    This function provides the optimization logic directly usable by Optuna.
+    For full configuration, use the OptunaObjective class.
     
     Optimize:
     - BGRU hidden dimensions: [64, 128, 256]
@@ -399,12 +407,54 @@ def objective_function(trial: Trial) -> float:
         trial: Optuna trial object
     
     Returns:
-        Validation accuracy
+        Validation accuracy (to be maximized)
+    
+    Note:
+        This function requires the following user attributes on the trial:
+        - 'train_df': Training DataFrame
+        - 'val_df': Validation DataFrame
+        - 'feature_groups': List of feature groups
+        - 'class_weights': Optional class weights tensor
+        - 'sequence_length': Sequence length (default: 60)
+        - 'epochs': Number of epochs (default: 20)
+        - 'device': Device to use (default: auto-detect)
+    
+    Example:
+        >>> study = optuna.create_study(direction='maximize')
+        >>> study.set_user_attr('train_df', train_df)
+        >>> study.set_user_attr('val_df', val_df)
+        >>> study.set_user_attr('feature_groups', ['ohlcv'])
+        >>> study.optimize(objective_function, n_trials=30)
     """
-    raise NotImplementedError(
-        "Use OptunaObjective class instead. This function signature "
-        "is provided for documentation purposes only."
+    # Get data from study user attributes
+    study = trial.study
+    
+    train_df = study.user_attrs.get('train_df')
+    val_df = study.user_attrs.get('val_df')
+    feature_groups = study.user_attrs.get('feature_groups', ['ohlcv'])
+    class_weights = study.user_attrs.get('class_weights')
+    sequence_length = study.user_attrs.get('sequence_length', 60)
+    epochs = study.user_attrs.get('epochs', 20)
+    device = study.user_attrs.get('device')
+    
+    if train_df is None or val_df is None:
+        raise ValueError(
+            "train_df and val_df must be set as study user attributes. "
+            "Use study.set_user_attr('train_df', df) before optimization."
+        )
+    
+    # Create objective instance and call it
+    objective = OptunaObjective(
+        train_df=train_df,
+        val_df=val_df,
+        feature_groups=feature_groups,
+        class_weights=class_weights,
+        sequence_length=sequence_length,
+        epochs=epochs,
+        device=device
     )
+    
+    return objective(trial)
 
 
 def train_with_best_params(
