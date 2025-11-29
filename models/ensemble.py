@@ -94,20 +94,21 @@ class BGRUXGBoostEnsemble:
         # Setup logging
         self.logger = logging.getLogger(__name__)
         
-        # Initialize BGRU model
+        # Initialize BGRU model with default parameters
+        # n_static_features will be updated when model is loaded or data is prepared
         self.bgru_model = HybridBGRUModel(
             sequence_length=sequence_length,
             device=device
         )
         
-        # Load trained BGRU model
+        # Load trained BGRU model (this will also set correct n_static_features)
         if os.path.exists(bgru_model_path):
             self.bgru_model.load_model(bgru_model_path)
             self.logger.info(f"Loaded BGRU model from {bgru_model_path}")
         else:
             self.logger.warning(
                 f"BGRU model not found at {bgru_model_path}. "
-                "Model must be trained or provided."
+                "Model must be trained or provided before making predictions."
             )
         
         # Initialize XGBoost model (will be trained later)
@@ -181,7 +182,8 @@ class BGRUXGBoostEnsemble:
         n_estimators: int = 100,
         subsample: float = 0.8,
         colsample_bytree: float = 0.8,
-        random_state: int = 42
+        random_state: int = 42,
+        verbose: bool = False
     ) -> Dict[str, float]:
         """
         Train XGBoost on technical + temporal + price action features.
@@ -202,6 +204,7 @@ class BGRUXGBoostEnsemble:
             subsample: Subsample ratio of training instances (default: 0.8)
             colsample_bytree: Subsample ratio of columns (default: 0.8)
             random_state: Random seed (default: 42)
+            verbose: Whether to print training progress (default: False)
         
         Returns:
             Dictionary containing training and validation metrics
@@ -246,7 +249,7 @@ class BGRUXGBoostEnsemble:
         self.xgb_model.fit(
             X_train, y_train,
             eval_set=[(X_train, y_train), (X_val, y_val)],
-            verbose=True
+            verbose=verbose
         )
         
         # Evaluate
@@ -306,8 +309,12 @@ class BGRUXGBoostEnsemble:
         
         X, _ = self._prepare_xgb_features(df)
         
-        # Align with BGRU output (skip first sequence_length samples)
-        X_aligned = X[self.sequence_length - 1:]
+        # Align with BGRU output: 
+        # BGRU outputs len(df) - sequence_length predictions
+        # Starting from feature index sequence_length - 1
+        # Ending at feature index len(df) - 2 (since BGRU's last target is at len(df)-1)
+        n_bgru_samples = len(df) - self.sequence_length
+        X_aligned = X[self.sequence_length - 1:self.sequence_length - 1 + n_bgru_samples]
         
         probabilities = self.xgb_model.predict_proba(X_aligned)[:, 1]
         return probabilities
@@ -419,13 +426,16 @@ class BGRUXGBoostEnsemble:
         bgru_probs = self._get_bgru_predictions(val_df, batch_size)
         xgb_probs = self._get_xgb_predictions(val_df)
         
-        # Align predictions
+        # Both should now have the same length due to proper alignment
+        # But take min_len just in case
         min_len = min(len(bgru_probs), len(xgb_probs))
         bgru_probs = bgru_probs[:min_len]
         xgb_probs = xgb_probs[:min_len]
         
-        # Get aligned targets
-        targets = val_df['target'].values[self.sequence_length - 1:]
+        # Get aligned targets - BGRU outputs predictions for targets starting at 
+        # index sequence_length - 1, with len(df) - sequence_length total predictions
+        n_samples = len(val_df) - self.sequence_length
+        targets = val_df['target'].values[self.sequence_length - 1:self.sequence_length - 1 + n_samples]
         targets = targets[:min_len]
         
         # Log individual model performance
@@ -617,8 +627,9 @@ class BGRUXGBoostEnsemble:
             test_df, method=method, batch_size=batch_size
         )
         
-        # Get aligned targets
-        targets = test_df['target'].values[self.sequence_length - 1:]
+        # Get aligned targets - matches BGRU output alignment
+        n_samples = len(test_df) - self.sequence_length
+        targets = test_df['target'].values[self.sequence_length - 1:self.sequence_length - 1 + n_samples]
         targets = targets[:len(predictions)]
         
         accuracy = accuracy_score(targets, predictions)

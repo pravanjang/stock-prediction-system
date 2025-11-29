@@ -29,9 +29,15 @@ from models.bgru_hybrid import (
 from models.ensemble import BGRUXGBoostEnsemble, get_all_features
 
 
+# Number of static features for synthetic test data
+N_STATIC_FEATURES = len(TECHNICAL_FEATURES) + len(TEMPORAL_FEATURES) + len(PRICE_ACTION_FEATURES)
+
+
 def create_synthetic_data(n_samples: int = 500) -> pd.DataFrame:
     """Create synthetic data with all required features."""
-    dates = pd.date_range('2024-01-01', periods=n_samples, freq='D')
+    # Use relative date calculation for flexibility
+    start_date = pd.Timestamp.now().normalize() - pd.Timedelta(days=n_samples)
+    dates = pd.date_range(start_date, periods=n_samples, freq='D')
     
     data = {
         'datetime': dates,
@@ -206,8 +212,7 @@ def test_weight_optimization():
         )
         
         # Set n_static_features to match synthetic data
-        n_static = len(TECHNICAL_FEATURES) + len(TEMPORAL_FEATURES) + len(PRICE_ACTION_FEATURES)
-        ensemble.bgru_model.n_static_features = n_static
+        ensemble.bgru_model.n_static_features = N_STATIC_FEATURES
         
         # Build BGRU model manually for testing
         ensemble.bgru_model.build_model()
@@ -256,8 +261,7 @@ def test_ensemble_predictions():
         )
         
         # Set n_static_features to match synthetic data
-        n_static = len(TECHNICAL_FEATURES) + len(TEMPORAL_FEATURES) + len(PRICE_ACTION_FEATURES)
-        ensemble.bgru_model.n_static_features = n_static
+        ensemble.bgru_model.n_static_features = N_STATIC_FEATURES
         
         # Build BGRU model manually for testing
         ensemble.bgru_model.build_model()
@@ -313,15 +317,12 @@ def test_save_load():
         train_df = create_synthetic_data(200)
         val_df = create_synthetic_data(100)
         
-        # Calculate n_static for synthetic data
-        n_static = len(TECHNICAL_FEATURES) + len(TEMPORAL_FEATURES) + len(PRICE_ACTION_FEATURES)
-        
         # Initialize and train ensemble
         ensemble1 = BGRUXGBoostEnsemble(
             bgru_model_path=bgru_path,
             sequence_length=60
         )
-        ensemble1.bgru_model.n_static_features = n_static
+        ensemble1.bgru_model.n_static_features = N_STATIC_FEATURES
         ensemble1.bgru_model.build_model()
         ensemble1.train_xgboost(train_df, val_df, n_estimators=10, max_depth=3)
         ensemble1.optimize_weights(val_df)
@@ -345,7 +346,7 @@ def test_save_load():
             bgru_model_path=bgru_path,
             sequence_length=60
         )
-        ensemble2.bgru_model.n_static_features = n_static
+        ensemble2.bgru_model.n_static_features = N_STATIC_FEATURES
         ensemble2.bgru_model.build_model()
         ensemble2.load_ensemble(ensemble_path)
         
@@ -385,15 +386,12 @@ def test_evaluation():
         val_df = create_synthetic_data(100)
         test_df = create_synthetic_data(80)
         
-        # Calculate n_static for synthetic data
-        n_static = len(TECHNICAL_FEATURES) + len(TEMPORAL_FEATURES) + len(PRICE_ACTION_FEATURES)
-        
         # Initialize and train ensemble
         ensemble = BGRUXGBoostEnsemble(
             bgru_model_path=bgru_path,
             sequence_length=60
         )
-        ensemble.bgru_model.n_static_features = n_static
+        ensemble.bgru_model.n_static_features = N_STATIC_FEATURES
         ensemble.bgru_model.build_model()
         ensemble.train_xgboost(train_df, val_df, n_estimators=10, max_depth=3)
         ensemble.optimize_weights(val_df)
