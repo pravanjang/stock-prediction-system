@@ -3,7 +3,8 @@
 Bidirectional GRU Model for BankNifty Directional Prediction.
 
 This module implements a BGRU-based neural network for predicting
-the directional movement of BankNifty index using OHLCV sequences.
+the directional movement of BankNifty index using OHLCV sequences
+and additional technical, temporal, and price action features.
 """
 
 import argparse
@@ -12,7 +13,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,6 +27,84 @@ from sklearn.utils.class_weight import compute_class_weight
 
 # Constants
 MIN_STD = 1e-8  # Minimum standard deviation to avoid division by zero
+
+# Default feature groups for flexible model configuration
+OHLCV_FEATURES = ['open', 'high', 'low', 'close', 'volume']
+
+TECHNICAL_FEATURES = [
+    'rsi_14', 'rsi_21', 'macd', 'macd_signal', 'macd_hist',
+    'stoch_k', 'stoch_d', 'adx_14', 'momentum_10',
+    'ema_9', 'ema_21', 'ema_50', 'ema_200', 'sma_20', 'sma_50',
+    'supertrend_10_3', 'supertrend_7_2',
+    'bb_upper', 'bb_middle', 'bb_lower', 'bb_width',
+    'psar', 'volume_sma_20', 'volume_roc_10', 'obv', 'vwap',
+    'mfi_14', 'atr_14', 'hist_vol_20', 'bb_width_pct'
+]
+
+TEMPORAL_FEATURES = [
+    'day_sin', 'day_cos', 'week_of_month', 'month_sin', 'month_cos',
+    'days_to_monthly_expiry', 'is_monthly_expiry', 'has_weekly_expiry',
+    'days_to_weekly_expiry', 'is_weekly_expiry', 'is_expiry_day',
+    'days_to_expiry', 'is_expiry_week'
+]
+
+PRICE_ACTION_FEATURES = [
+    'is_bullish_engulf', 'is_bearish_engulf', 'is_doji', 'is_hammer',
+    'is_shooting_star', 'is_inside_bar',
+    'return_1', 'return_5', 'return_15', 'return_30', 'return_60',
+    'range_pct', 'close_position', 'gap_at_open', 'body_to_range',
+    'volume_price_trend', 'price_volume_correlation',
+    'volume_imbalance', 'price_impact', 'volatility_regime',
+    'volume_trend', 'tick_direction'
+]
+
+# Features that should use min-max normalization (already bounded 0-1 or 0-100)
+BOUNDED_FEATURES = [
+    'rsi_14', 'rsi_21', 'stoch_k', 'stoch_d', 'mfi_14', 'adx_14',
+    'day_sin', 'day_cos', 'month_sin', 'month_cos',
+    'close_position', 'body_to_range', 'volatility_regime'
+]
+
+# Features that should NOT be normalized (binary or already in proper scale)
+NO_NORMALIZE_FEATURES = [
+    'is_monthly_expiry', 'has_weekly_expiry', 'is_weekly_expiry',
+    'is_expiry_day', 'is_expiry_week', 'week_of_month',
+    'is_bullish_engulf', 'is_bearish_engulf', 'is_doji', 'is_hammer',
+    'is_shooting_star', 'is_inside_bar', 'tick_direction'
+]
+
+
+def get_all_features() -> List[str]:
+    """Return all available feature names."""
+    return OHLCV_FEATURES + TECHNICAL_FEATURES + TEMPORAL_FEATURES + PRICE_ACTION_FEATURES
+
+
+def get_feature_groups() -> Dict[str, List[str]]:
+    """Return feature groups dictionary."""
+    return {
+        'ohlcv': OHLCV_FEATURES,
+        'technical': TECHNICAL_FEATURES,
+        'temporal': TEMPORAL_FEATURES,
+        'price_action': PRICE_ACTION_FEATURES
+    }
+
+
+def print_feature_summary() -> None:
+    """Print a summary of available features."""
+    groups = get_feature_groups()
+    print("\n" + "=" * 60)
+    print("AVAILABLE FEATURE GROUPS")
+    print("=" * 60)
+    
+    for group_name, features in groups.items():
+        print(f"\n{group_name.upper()} ({len(features)} features):")
+        print("-" * 40)
+        for i, feat in enumerate(features):
+            print(f"  {i+1:2d}. {feat}")
+    
+    total = sum(len(f) for f in groups.values())
+    print(f"\nTotal features available: {total}")
+    print("=" * 60 + "\n")
 
 
 class BGRUModel(nn.Module):
@@ -159,28 +238,62 @@ class BGRUPredictor:
     Bidirectional GRU predictor for BankNifty directional prediction.
     
     This class handles data preparation, model training, prediction,
-    and model persistence.
+    and model persistence. Supports configurable feature sets including
+    OHLCV, technical indicators, temporal features, and price action features.
     """
     
     def __init__(
         self,
-        input_dim: int = 5,
+        input_dim: Optional[int] = None,
         hidden_dim: int = 128,
         num_layers: int = 2,
         dropout: float = 0.3,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        feature_columns: Optional[List[str]] = None,
+        feature_groups: Optional[List[str]] = None
     ):
         """
         Initialize the BGRU predictor.
         
         Args:
-            input_dim: Number of input features (default: 5 for OHLCV)
+            input_dim: Number of input features. If None, determined from feature_columns.
             hidden_dim: Hidden dimension for BGRU layers (default: 128)
             num_layers: Number of GRU layers (default: 2)
             dropout: Dropout rate (default: 0.3)
             device: Device to use ('cuda', 'cpu', or None for auto-detect)
+            feature_columns: Explicit list of feature column names to use.
+                            If None, uses feature_groups or defaults to OHLCV.
+            feature_groups: List of feature group names to use: 
+                           'ohlcv', 'technical', 'temporal', 'price_action'.
+                           Ignored if feature_columns is provided.
+        
+        Examples:
+            # OHLCV only (default behavior)
+            predictor = BGRUPredictor()
+            
+            # OHLCV + Technical indicators
+            predictor = BGRUPredictor(feature_groups=['ohlcv', 'technical'])
+            
+            # All features
+            predictor = BGRUPredictor(feature_groups=['ohlcv', 'technical', 'temporal', 'price_action'])
+            
+            # Custom feature selection
+            predictor = BGRUPredictor(feature_columns=['open', 'high', 'low', 'close', 'volume', 'rsi_14', 'macd'])
         """
-        self.input_dim = input_dim
+        # Determine feature columns
+        if feature_columns is not None:
+            self.feature_columns = feature_columns
+        elif feature_groups is not None:
+            self.feature_columns = self._get_columns_from_groups(feature_groups)
+        else:
+            self.feature_columns = OHLCV_FEATURES.copy()
+        
+        # Set input dimension
+        if input_dim is not None:
+            self.input_dim = input_dim
+        else:
+            self.input_dim = len(self.feature_columns)
+        
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
@@ -205,6 +318,28 @@ class BGRUPredictor:
         
         # Setup logging
         self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Initialized BGRUPredictor with {len(self.feature_columns)} features")
+        self.logger.info(f"Features: {self.feature_columns}")
+    
+    def _get_columns_from_groups(self, groups: List[str]) -> List[str]:
+        """
+        Get feature column names from group names.
+        
+        Args:
+            groups: List of group names ('ohlcv', 'technical', 'temporal', 'price_action')
+        
+        Returns:
+            List of feature column names
+        """
+        all_groups = get_feature_groups()
+        columns = []
+        for group in groups:
+            group_lower = group.lower()
+            if group_lower in all_groups:
+                columns.extend(all_groups[group_lower])
+            else:
+                self.logger.warning(f"Unknown feature group: {group}. Available: {list(all_groups.keys())}")
+        return columns
     
     def build_model(self) -> BGRUModel:
         """
@@ -235,15 +370,23 @@ class BGRUPredictor:
         self,
         df: pd.DataFrame,
         method: str = 'rolling_zscore',
-        window: int = 100
+        window: int = 100,
+        feature_columns: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
-        Normalizes OHLCV data using rolling z-score.
+        Normalizes feature data using appropriate methods for each feature type.
+        
+        Normalization strategies:
+        - OHLCV features: Rolling z-score normalization
+        - Bounded features (RSI, etc.): Min-max scaling to [0, 1]
+        - Binary features: No normalization (already 0/1)
+        - Other features: Rolling z-score normalization
         
         Args:
-            df: DataFrame with OHLCV columns
-            method: Normalization method (only 'rolling_zscore' supported)
+            df: DataFrame with feature columns
+            method: Base normalization method (only 'rolling_zscore' supported)
             window: Rolling window size for z-score calculation
+            feature_columns: Columns to normalize. If None, uses self.feature_columns.
         
         Returns:
             Normalized DataFrame
@@ -252,25 +395,51 @@ class BGRUPredictor:
             raise ValueError(f"Unsupported normalization method: {method}")
         
         df = df.copy()
-        ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
         
-        # Ensure columns exist
-        available_cols = [col for col in ohlcv_cols if col in df.columns]
+        # Use provided columns or instance columns
+        cols_to_normalize = feature_columns if feature_columns is not None else self.feature_columns
+        
+        # Filter to columns that exist in dataframe
+        available_cols = [col for col in cols_to_normalize if col in df.columns]
         if not available_cols:
-            raise ValueError("No OHLCV columns found in DataFrame")
+            raise ValueError(f"No feature columns found in DataFrame. Expected: {cols_to_normalize[:5]}...")
+        
+        missing_cols = set(cols_to_normalize) - set(available_cols)
+        if missing_cols:
+            self.logger.warning(f"Missing columns in DataFrame: {missing_cols}")
         
         empty_cols = []
+        
         for col in available_cols:
+            # Skip binary/categorical features that don't need normalization
+            if col in NO_NORMALIZE_FEATURES:
+                continue
+            
+            # Use min-max scaling for bounded features
+            if col in BOUNDED_FEATURES:
+                col_min = df[col].min()
+                col_max = df[col].max()
+                if col_max - col_min > MIN_STD:
+                    df[col] = (df[col] - col_min) / (col_max - col_min)
+                else:
+                    df[col] = 0.5  # Default to midpoint if no variation
+                continue
+            
+            # Use rolling z-score for unbounded continuous features
             rolling_mean = df[col].rolling(window=window, min_periods=1).mean()
             rolling_std = df[col].rolling(window=window, min_periods=1).std()
             # Avoid division by zero
             rolling_std = rolling_std.replace(0, MIN_STD)
             normalized = (df[col] - rolling_mean) / rolling_std
             normalized = normalized.replace([np.inf, -np.inf], np.nan)
+            
             if normalized.isna().all():
                 empty_cols.append(col)
                 df[col] = 0.0
                 continue
+            
+            # Clip extreme values to prevent outliers from affecting training
+            normalized = normalized.clip(-5, 5)
             normalized = normalized.ffill().bfill().fillna(0.0)
             df[col] = normalized
         
@@ -280,7 +449,7 @@ class BGRUPredictor:
                 empty_cols
             )
         
-        # Handle any remaining NaN values outside OHLCV columns
+        # Handle any remaining NaN/inf values
         df = df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
         
         return df
@@ -288,28 +457,46 @@ class BGRUPredictor:
     def prepare_sequences(
         self,
         df: pd.DataFrame,
-        sequence_length: int = 60
+        sequence_length: int = 60,
+        feature_columns: Optional[List[str]] = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Prepares sequential data for BGRU.
         
-        Creates sliding windows of specified length for OHLCV data.
+        Creates sliding windows of specified length for the configured features.
         
         Args:
-            df: DataFrame with OHLCV columns and 'target' column
+            df: DataFrame with feature columns and 'target' column
             sequence_length: Number of time steps in each sequence (default: 60)
+            feature_columns: Optional override for feature columns. 
+                            If None, uses self.feature_columns.
         
         Returns:
-            X: Sequences array of shape [num_samples, sequence_length, 5]
+            X: Sequences array of shape [num_samples, sequence_length, num_features]
             y: Target array of shape [num_samples]
         """
-        ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
+        # Use provided columns or instance columns
+        cols_to_use = feature_columns if feature_columns is not None else self.feature_columns
+        
+        # Filter to columns that exist in dataframe
+        available_cols = [col for col in cols_to_use if col in df.columns]
+        if not available_cols:
+            raise ValueError(f"No feature columns found in DataFrame. Expected: {cols_to_use[:5]}...")
+        
+        if len(available_cols) < len(cols_to_use):
+            missing = set(cols_to_use) - set(available_cols)
+            raise ValueError(
+                f"Missing {len(missing)} required feature columns in DataFrame: {list(missing)[:10]}...\n"
+                f"Expected {len(cols_to_use)} columns but found only {len(available_cols)}.\n"
+                f"Make sure all data files (train.csv, val.csv, test.csv) have the required features.\n"
+                f"You may need to regenerate the data with all features using the feature engineering pipeline."
+            )
         
         # Normalize data
-        df_norm = self.normalize_data(df, method='rolling_zscore', window=100)
+        df_norm = self.normalize_data(df, method='rolling_zscore', window=100, feature_columns=available_cols)
         
-        # Extract OHLCV features and ensure they are finite
-        features = df_norm[ohlcv_cols].values.astype(np.float32, copy=False)
+        # Extract features and ensure they are finite
+        features = df_norm[available_cols].values.astype(np.float32, copy=False)
         invalid_features = ~np.isfinite(features)
         if invalid_features.any():
             invalid_count = int(invalid_features.sum())
@@ -347,7 +534,9 @@ class BGRUPredictor:
         else:
             y = np.array([])
         
-        self.logger.info(f"Prepared {len(X)} sequences of length {sequence_length}")
+        self.logger.info(f"Prepared {len(X)} sequences of length {sequence_length} with {len(available_cols)} features")
+        
+        return X, y
         
         return X, y
     
@@ -768,12 +957,14 @@ class BGRUPredictor:
             'hidden_dim': self.hidden_dim,
             'num_layers': self.num_layers,
             'dropout': self.dropout,
+            'feature_columns': self.feature_columns,  # Save feature configuration
             'training_history': self.training_history,
             'saved_at': datetime.now().isoformat()
         }
         
         torch.save(checkpoint, path)
         self.logger.info(f"Model saved to {path}")
+        self.logger.info(f"Saved with {len(self.feature_columns)} features: {self.feature_columns[:5]}...")
     
     def load_model(self, path: str) -> None:
         """
@@ -803,6 +994,11 @@ class BGRUPredictor:
         self.num_layers = int(checkpoint.get('num_layers', self.num_layers))
         self.dropout = float(checkpoint.get('dropout', self.dropout))
         
+        # Load feature columns if available
+        if 'feature_columns' in checkpoint:
+            self.feature_columns = checkpoint['feature_columns']
+            self.logger.info(f"Loaded feature configuration with {len(self.feature_columns)} features")
+        
         # Build model with loaded configuration
         self.build_model()
         if self.model is None:
@@ -816,6 +1012,7 @@ class BGRUPredictor:
             self.training_history = checkpoint['training_history']
         
         self.logger.info(f"Model loaded from {path}")
+        self.logger.info(f"Model uses {len(self.feature_columns)} features: {self.feature_columns[:5]}...")
 
 
 def setup_logging(log_dir: str = 'models/logs/') -> None:
@@ -922,6 +1119,19 @@ def main():
         default=None,
         help='Path to model checkpoint for loading'
     )
+    parser.add_argument(
+        '--feature_groups',
+        type=str,
+        nargs='+',
+        default=['ohlcv'],
+        choices=['ohlcv', 'technical', 'temporal', 'price_action'],
+        help='Feature groups to use (default: ohlcv). Options: ohlcv, technical, temporal, price_action'
+    )
+    parser.add_argument(
+        '--all_features',
+        action='store_true',
+        help='Use all available features (ohlcv + technical + temporal + price_action)'
+    )
     
     args = parser.parse_args()
     
@@ -929,8 +1139,16 @@ def main():
     setup_logging(args.log_dir)
     logger = logging.getLogger(__name__)
     
-    # Initialize predictor
-    predictor = BGRUPredictor()
+    # Determine feature groups
+    if args.all_features:
+        feature_groups = ['ohlcv', 'technical', 'temporal', 'price_action']
+    else:
+        feature_groups = args.feature_groups
+    
+    logger.info(f"Using feature groups: {feature_groups}")
+    
+    # Initialize predictor with feature groups
+    predictor = BGRUPredictor(feature_groups=feature_groups)
     
     if args.train:
         # Load training and validation data
@@ -952,6 +1170,7 @@ def main():
         val_df = pd.read_csv(val_path, index_col=0, parse_dates=True)
         
         logger.info(f"Train samples: {len(train_df)}, Val samples: {len(val_df)}")
+        logger.info(f"Model input dimension: {predictor.input_dim} features")
         
         # Train model
         predictor.train(

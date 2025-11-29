@@ -91,6 +91,14 @@ def _fetch_from_yfinance(start_date: str, end_date: str, interval: str) -> pd.Da
         logger.warning("No data returned from Yahoo Finance")
         return pd.DataFrame()
     
+    # Persist raw Yahoo Finance data for auditing
+    raw_dir = Path('data/raw')
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_filename = f"NSEBANK_{start_date}_{end_date}_{interval}.csv"
+    raw_path = raw_dir / raw_filename
+    df.to_csv(raw_path, index_label='datetime')
+    logger.info(f"Saved raw Yahoo data to {raw_path}")
+    
     # Standardize column names
     df = df.rename(columns={
         'Open': 'open',
@@ -246,13 +254,18 @@ def _load_and_standardize_csv(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def clean_data(df: pd.DataFrame, log_file: Optional[str] = None) -> pd.DataFrame:
+def clean_data(
+    df: pd.DataFrame,
+    log_file: Optional[str] = None,
+    interval: str = '15m'
+) -> pd.DataFrame:
     """
     Clean and validate the data with quality checks.
     
     Args:
         df: Raw DataFrame with OHLCV data
         log_file: Optional path to write cleaning log
+        interval: Data interval string (used to skip time-based checks for daily data)
     
     Returns:
         Cleaned DataFrame
@@ -263,6 +276,8 @@ def clean_data(df: pd.DataFrame, log_file: Optional[str] = None) -> pd.DataFrame
     
     cleaning_log = []
     original_rows = len(df)
+    interval_normalized = (interval or '').lower()
+    is_daily_interval = interval_normalized in {'1d', '1day', 'daily'}
     
     def log_step(message: str):
         cleaning_log.append(f"{datetime.now().isoformat()} - {message}")
@@ -270,7 +285,12 @@ def clean_data(df: pd.DataFrame, log_file: Optional[str] = None) -> pd.DataFrame
     
     log_step(f"Starting data cleaning. Initial rows: {original_rows}")
     
-    # 1. Remove duplicate timestamps
+    if is_daily_interval and isinstance(df.index, pd.DatetimeIndex):
+        # Normalize to midnight so only the date portion is considered
+        df.index = df.index.normalize()
+        log_step("Interval identified as daily; normalized index to date-only values")
+    
+    # 1. Remove duplicate timestamps (dates for daily data)
     duplicates_before = df.index.duplicated().sum()
     if duplicates_before > 0:
         df = df[~df.index.duplicated(keep='last')]
@@ -280,8 +300,12 @@ def clean_data(df: pd.DataFrame, log_file: Optional[str] = None) -> pd.DataFrame
     df = df.sort_index()
     log_step("Data sorted by datetime index")
     
-    # 3. Filter to trading hours (9:15 AM - 3:30 PM IST)
-    if df.index.tz is not None:
+    # 3. Filter to trading hours (9:15 AM - 3:30 PM IST) for intraday data only
+    if (
+        not is_daily_interval and
+        isinstance(df.index, pd.DatetimeIndex) and
+        df.index.tz is not None
+    ):
         trading_hours_mask = (
             (df.index.time >= MARKET_OPEN) & 
             (df.index.time <= MARKET_CLOSE)
@@ -290,12 +314,18 @@ def clean_data(df: pd.DataFrame, log_file: Optional[str] = None) -> pd.DataFrame
         if non_trading_rows > 0:
             df = df[trading_hours_mask]
             log_step(f"Removed {non_trading_rows} rows outside trading hours (9:15 AM - 3:30 PM IST)")
+    elif is_daily_interval:
+        log_step("Skipping trading-hours filter for daily interval data")
     
     # 4. Flag and handle abnormal price gaps (>5% moves in 15min)
+    log_step("Checking for abnormal price gaps (>5% change)")
     df = df.copy()
+    log_step("Calculating percentage price changes")
     df['price_change_pct'] = df['close'].pct_change().abs() * 100
     abnormal_gaps = df['price_change_pct'] > 5
     abnormal_count = abnormal_gaps.sum()
+
+    log_step(f"Identified {abnormal_count} abnormal price gaps (>5% change)")
     
     if abnormal_count > 0:
         # We flag but don't remove these (they could be legitimate)
@@ -581,8 +611,18 @@ def main():
             logger.error("No data fetched. Please check your parameters and try again.")
             return 1
         
+        """ # Persist raw Yahoo Finance data for auditing
+        if args.source == 'yfinance':
+            raw_dir = Path('data/raw')
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            sanitized_interval = str(args.interval).replace('/', '-').replace(' ', '')
+            raw_filename = f"NSEBANK_{args.start_date}_{args.end_date}_{sanitized_interval}.csv"
+            raw_path = raw_dir / raw_filename
+            df.to_csv(raw_path, index_label='datetime')
+            logger.info(f"Saved raw Yahoo data to {raw_path}") """
+        
         # Clean data
-        df = clean_data(df, log_file=cleaning_log_path)
+        df = clean_data(df, log_file=cleaning_log_path, interval=args.interval)
         
         if df.empty:
             logger.error("No data remaining after cleaning.")
