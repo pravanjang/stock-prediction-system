@@ -22,6 +22,7 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
+from sklearn.utils.class_weight import compute_class_weight
 
 # Constants
 MIN_STD = 1e-8  # Minimum standard deviation to avoid division by zero
@@ -71,22 +72,20 @@ class BGRUModel(nn.Module):
         # for intraday, simpler model without attention
         self.use_attention = use_attention
         
-        # First BGRU layer
+        # First BGRU layer (no internal dropout - applied via separate Dropout layer)
         self.gru1 = nn.GRU(
             input_dim, hidden_dim, 
             batch_first=True, 
-            bidirectional=True,
-            dropout=dropout if num_layers > 1 else 0
+            bidirectional=True
         )
         self.dropout1 = nn.Dropout(dropout)
         
-        # Second BGRU layer
+        # Second BGRU layer (no internal dropout - applied via separate Dropout layer)
         self.gru2 = nn.GRU(
             hidden_dim * 2,  # *2 because bidirectional
             hidden_dim // 2, 
             batch_first=True, 
-            bidirectional=True,
-            dropout=dropout if num_layers > 1 else 0
+            bidirectional=True
         )
         self.dropout2 = nn.Dropout(dropout)
         
@@ -132,7 +131,7 @@ class BGRUModel(nn.Module):
         # Apply attention if enabled
         if self.use_attention:
             # Self-attention over sequence
-            attn_out, attn_weights = self.attention(out, out, out)
+            attn_out, _ = self.attention(out, out, out)
             # Take last time step after attention
             out = attn_out[:, -1, :]  # [batch, hidden_dim]
         else:
@@ -352,6 +351,40 @@ class BGRUPredictor:
         
         return X, y
     
+    def _log_class_distribution(self, targets: np.ndarray, split: str = 'Train') -> Dict[int, int]:
+        """Log and return class distribution for diagnostics."""
+        if targets.size == 0:
+            self.logger.warning(f"No targets available to log distribution for {split} split.")
+            return {}
+        labels = targets.astype(int)
+        unique_classes, counts = np.unique(labels, return_counts=True)
+        distribution = {int(cls): int(cnt) for cls, cnt in zip(unique_classes, counts)}
+        self.logger.info(f"{split} class distribution: {distribution}")
+        return distribution
+    
+    def _compute_class_weights(self, targets: np.ndarray) -> torch.Tensor:
+        """Compute balanced class weights given binary targets."""
+        if targets.size == 0:
+            raise ValueError("Cannot compute class weights with empty target array.")
+        labels = targets.astype(int)
+        unique_classes = np.unique(labels)
+        if len(unique_classes) < 2:
+            self.logger.warning(
+                "Only one class present in training targets. Using equal class weights."
+            )
+            return torch.ones(2, dtype=torch.float32, device=self.device)
+        weights = compute_class_weight(
+            class_weight='balanced',
+            classes=np.array([0, 1]),
+            y=labels
+        )
+        weights_tensor = torch.tensor(weights, dtype=torch.float32, device=self.device)
+        self.logger.info(
+            "Computed balanced class weights (neg,pos): %s",
+            weights.tolist()
+        )
+        return weights_tensor
+    
     def train(
         self,
         train_df: pd.DataFrame,
@@ -382,7 +415,8 @@ class BGRUPredictor:
             batch_size: Batch size (default: 64)
             lr: Learning rate (default: 0.001)
             sequence_length: Sequence length for BGRU input (default: 60)
-            class_weights: Optional class weights for imbalanced data
+            class_weights: Optional class weights for imbalanced data (neg,pos). If None,
+                balanced weights are computed from the training targets.
             checkpoint_dir: Directory to save model checkpoints
             log_dir: Directory to save training logs
         
@@ -407,6 +441,9 @@ class BGRUPredictor:
         # Build model if not already built
         if self.model is None:
             self.build_model()
+        if self.model is None:
+            raise RuntimeError("Model initialization failed during training.")
+        model = self.model
         
         # Prepare data
         self.logger.info("Preparing training sequences...")
@@ -417,6 +454,24 @@ class BGRUPredictor:
         if len(X_train) == 0 or len(X_val) == 0:
             raise ValueError("Insufficient data for training. Need more samples than sequence_length.")
         
+        # Log class distribution and determine weights
+        self._log_class_distribution(y_train, split='Train')
+        if class_weights is not None:
+            if isinstance(class_weights, torch.Tensor):
+                class_weights_tensor = class_weights.to(self.device, dtype=torch.float32)
+            else:
+                class_weights_tensor = torch.tensor(
+                    class_weights,
+                    dtype=torch.float32,
+                    device=self.device
+                )
+            self.logger.info(
+                "Using provided class weights (neg,pos): %s",
+                class_weights_tensor.tolist()
+            )
+        else:
+            class_weights_tensor = self._compute_class_weights(y_train)
+        
         # Convert to tensors
         X_train_tensor = torch.FloatTensor(X_train).to(self.device)
         y_train_tensor = torch.FloatTensor(y_train).unsqueeze(1).to(self.device)
@@ -424,17 +479,22 @@ class BGRUPredictor:
         y_val_tensor = torch.FloatTensor(y_val).unsqueeze(1).to(self.device)
         
         # Create data loaders
+        # Note: pin_memory is disabled since tensors are already on the target device
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
         
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, drop_last=False
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False
+        )
         
         # Loss function - using BCELoss since model has sigmoid output
         # For class weights, we use pos_weight with BCELoss using reduction='none' and manual weighting
-        if class_weights is not None:
-            # Calculate positive weight for imbalanced data
-            pos_weight = class_weights[1] / class_weights[0]
+        if class_weights_tensor is not None:
+            neg_weight = torch.clamp(class_weights_tensor[0], min=MIN_STD)
+            pos_weight = class_weights_tensor[1] / neg_weight
             
             def weighted_bce_loss(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
                 """Weighted BCE loss for handling class imbalance."""
@@ -450,7 +510,7 @@ class BGRUPredictor:
         
         # Optimizer
         optimizer = torch.optim.Adam(
-            self.model.parameters(),
+            model.parameters(),
             lr=lr,
             weight_decay=1e-5
         )
@@ -484,7 +544,7 @@ class BGRUPredictor:
         # Training loop
         for epoch in range(epochs):
             # Training phase
-            self.model.train()
+            model.train()
             train_loss = 0.0
             train_correct = 0
             train_total = 0
@@ -495,14 +555,14 @@ class BGRUPredictor:
                 optimizer.zero_grad()
                 
                 # Forward pass
-                outputs = self.model(batch_X)
+                outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
                 
                 # Backward pass
                 loss.backward()
                 
                 # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
                 
@@ -520,7 +580,7 @@ class BGRUPredictor:
             train_acc = train_correct / train_total
             
             # Validation phase
-            self.model.eval()
+            model.eval()
             val_loss = 0.0
             val_correct = 0
             val_total = 0
@@ -529,7 +589,7 @@ class BGRUPredictor:
                 val_pbar = tqdm(val_loader, desc=f"Epoch {epoch + 1}/{epochs} [Val]")
                 
                 for batch_X, batch_y in val_pbar:
-                    outputs = self.model(batch_X)
+                    outputs = model(batch_X)
                     loss = criterion(outputs, batch_y)
                     
                     val_loss += loss.item() * batch_X.size(0)
@@ -563,8 +623,9 @@ class BGRUPredictor:
                 f"LR: {current_lr:.6f}"
             )
             
-            # Early stopping and checkpointing based on validation accuracy
-            if val_acc > best_val_acc:
+            # Early stopping and checkpointing based on validation accuracy (ties broken by loss)
+            improved = (val_acc > best_val_acc) or (val_acc == best_val_acc and val_loss < best_val_loss)
+            if improved:
                 best_val_acc = val_acc
                 best_val_loss = val_loss
                 patience_counter = 0
@@ -572,7 +633,7 @@ class BGRUPredictor:
                 # Save best model
                 checkpoint_path = os.path.join(checkpoint_dir, 'bgru_baseline.pt')
                 self.save_model(checkpoint_path)
-                self.logger.info(f"Saved best model with Val Acc: {val_acc:.4f}")
+                self.logger.info(f"Saved best model with Val Acc: {val_acc:.4f}, Val Loss: {val_loss:.4f}")
             else:
                 patience_counter += 1
                 self.logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
@@ -594,8 +655,9 @@ class BGRUPredictor:
         self.logger.info(f"Training complete. Best Val Acc: {best_val_acc:.4f}")
         self.logger.info("=" * 60)
         
-        # Remove file handler
+        # Remove and close file handler
         self.logger.removeHandler(file_handler)
+        file_handler.close()
         
         return self.training_history
     
@@ -743,6 +805,8 @@ class BGRUPredictor:
         
         # Build model with loaded configuration
         self.build_model()
+        if self.model is None:
+            raise RuntimeError("Model initialization failed while loading checkpoint.")
         
         # Load weights
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -771,10 +835,8 @@ def setup_logging(log_dir: str = 'models/logs/') -> None:
         ]
     )
 
-def check_class_distribution(df):
-    """Check target distribution"""
-    import pandas as pd
-    
+def check_class_distribution(df: pd.DataFrame) -> np.ndarray:
+    """Check target distribution and return balanced class weights."""
     print("\n" + "="*60)
     print("CLASS DISTRIBUTION ANALYSIS")
     print("="*60)
@@ -786,7 +848,6 @@ def check_class_distribution(df):
     print(f"  Class 1 (UP):   {target_counts[1]} ({target_counts[1]/len(df)*100:.2f}%)")
     
     # Calculate class weights
-    from sklearn.utils.class_weight import compute_class_weight
     class_weights = compute_class_weight('balanced', 
                                          classes=np.unique(df['target']), 
                                          y=df['target'])
