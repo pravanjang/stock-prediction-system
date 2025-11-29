@@ -905,14 +905,48 @@ class HybridBGRUModel:
         self.n_price_features = int(
             checkpoint.get('n_price_features', self.n_price_features)
         )
-        self.n_static_features = int(
-            checkpoint.get('n_static_features', self.n_static_features)
-        )
         
+        # Load column configurations first (needed to determine n_static_features)
+        # Load column configurations first
         if 'ohlcv_columns' in checkpoint:
             self.ohlcv_columns = checkpoint['ohlcv_columns']
         if 'static_columns' in checkpoint:
             self.static_columns = checkpoint['static_columns']
+        
+        # Determine n_static_features from the actual model weights
+        # This is the most reliable way to get the correct value
+        if 'static_fc1.weight' in checkpoint['model_state_dict']:
+            weight_shape = checkpoint['model_state_dict']['static_fc1.weight'].shape
+            actual_n_static = weight_shape[1]  # Input dimension is the second dim
+            
+            if actual_n_static == 0:
+                self.logger.warning(
+                    "Model was trained with n_static_features=0 (no static features). "
+                    "The model will not use static features for predictions."
+                )
+                self.n_static_features = 0
+                self.static_columns = []  # Clear static columns since model doesn't use them
+            else:
+                self.n_static_features = actual_n_static
+                # Verify static_columns matches
+                if self.static_columns and len(self.static_columns) != actual_n_static:
+                    self.logger.warning(
+                        f"static_columns length ({len(self.static_columns)}) doesn't match "
+                        f"model weights ({actual_n_static}). Using weight dimension."
+                    )
+        else:
+            # Fallback to checkpoint value or static_columns length
+            if self.static_columns:
+                self.n_static_features = len(self.static_columns)
+            else:
+                self.n_static_features = int(
+                    checkpoint.get('n_static_features', self.n_static_features)
+                )
+        
+        self.logger.info(
+            f"Loading model with n_price_features={self.n_price_features}, "
+            f"n_static_features={self.n_static_features}"
+        )
         
         # Build and load model
         self.build_model()
