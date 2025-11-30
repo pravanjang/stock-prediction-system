@@ -92,29 +92,31 @@ class HybridBGRUNetwork(nn.Module):
         [Sequential Path - OHLCV sequences]
         Input: [batch, sequence_length, n_price_features]
             ↓
-        BGRU Layer 1: 128 units, bidirectional (output: 256)
+        BGRU Layer 1: hidden_dim units, bidirectional (output: hidden_dim*2)
             ↓
-        Dropout: 0.3
+        Dropout: dropout
             ↓
-        BGRU Layer 2: 64 units, bidirectional (output: 128)
+        BGRU Layer 2: hidden_dim//2 units, bidirectional (output: hidden_dim)
             ↓
-        Dropout: 0.3
+        Dropout: dropout
             ↓
-        Output: [batch, 128]
+        (Optional additional layers based on num_layers)
+            ↓
+        Output: [batch, hidden_dim]
         
         [Static Path - Technical/Temporal/Price Action features]
         Input: [batch, n_static_features]
             ↓
         Dense: 64 units, ReLU
             ↓
-        Dropout: 0.3
+        Dropout: dropout
             ↓
         Dense: 32 units, ReLU
             ↓
         Output: [batch, 32]
         
         [Fusion Layer]
-        Concat: [batch, 160] (128 from BGRU + 32 from static)
+        Concat: [batch, hidden_dim + 32]
             ↓
         Dense: 64 units, ReLU
             ↓
@@ -132,6 +134,7 @@ class HybridBGRUNetwork(nn.Module):
         n_price_features: int = 5,
         n_static_features: int = 50,
         hidden_dim: int = 128,
+        num_layers: int = 2,
         dropout: float = 0.3
     ):
         """
@@ -141,6 +144,7 @@ class HybridBGRUNetwork(nn.Module):
             n_price_features: Number of OHLCV features (default: 5)
             n_static_features: Number of static features (default: 50)
             hidden_dim: Hidden dimension for BGRU layers (default: 128)
+            num_layers: Number of BGRU layers (default: 2)
             dropout: Dropout probability (default: 0.3)
         """
         super(HybridBGRUNetwork, self).__init__()
@@ -148,26 +152,35 @@ class HybridBGRUNetwork(nn.Module):
         self.n_price_features = n_price_features
         self.n_static_features = n_static_features
         self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
         self.dropout = dropout
         
         # =========== Sequential Path (BGRU) ===========
-        # BGRU Layer 1: 128 units bidirectional
-        self.gru1 = nn.GRU(
-            n_price_features,
-            hidden_dim,
-            batch_first=True,
-            bidirectional=True
-        )
-        self.dropout1 = nn.Dropout(dropout)
+        # Build BGRU layers dynamically based on num_layers
+        self.gru_layers = nn.ModuleList()
+        self.gru_dropouts = nn.ModuleList()
         
-        # BGRU Layer 2: 64 units bidirectional
-        self.gru2 = nn.GRU(
-            hidden_dim * 2,  # *2 because bidirectional
-            hidden_dim // 2,  # 64 units
-            batch_first=True,
-            bidirectional=True
-        )
-        self.dropout2 = nn.Dropout(dropout)
+        for i in range(num_layers):
+            if i == 0:
+                # First layer: input_dim -> hidden_dim
+                input_size = n_price_features
+                output_size = hidden_dim
+            else:
+                # Subsequent layers: hidden_dim*2 -> hidden_dim // (2^i)
+                input_size = hidden_dim * 2 if i == 1 else self.gru_layers[i-1].hidden_size * 2
+                output_size = max(hidden_dim // (2 ** i), 32)  # Minimum 32 units
+            
+            gru = nn.GRU(
+                input_size,
+                output_size,
+                batch_first=True,
+                bidirectional=True
+            )
+            self.gru_layers.append(gru)
+            self.gru_dropouts.append(nn.Dropout(dropout))
+        
+        # Calculate final GRU output dimension
+        self.gru_output_dim = self.gru_layers[-1].hidden_size * 2  # *2 for bidirectional
         
         # =========== Static Path (Dense) ===========
         # Dense 64 -> Dense 32
@@ -179,8 +192,8 @@ class HybridBGRUNetwork(nn.Module):
         self.static_relu2 = nn.ReLU()
         
         # =========== Fusion Layer ===========
-        # BGRU output (128) + Static output (32) = 160
-        fusion_input_dim = hidden_dim + 32  # 128 + 32 = 160
+        # BGRU output (gru_output_dim) + Static output (32)
+        fusion_input_dim = self.gru_output_dim + 32
         
         self.fusion_fc1 = nn.Linear(fusion_input_dim, 64)
         self.fusion_relu1 = nn.ReLU()
@@ -209,14 +222,13 @@ class HybridBGRUNetwork(nn.Module):
         Returns:
             Output tensor of shape [batch, 1] with sigmoid activation
         """
-        # Sequential Path
-        out_seq, _ = self.gru1(seq_input)
-        out_seq = self.dropout1(out_seq)
+        # Sequential Path - pass through all GRU layers
+        out_seq = seq_input
+        for gru, dropout in zip(self.gru_layers, self.gru_dropouts):
+            out_seq, _ = gru(out_seq)
+            out_seq = dropout(out_seq)
         
-        out_seq, _ = self.gru2(out_seq)
-        out_seq = self.dropout2(out_seq)
-        
-        # Take last time step output [batch, hidden_dim]
+        # Take last time step output [batch, gru_output_dim]
         out_seq = out_seq[:, -1, :]
         
         # Static Path
@@ -258,6 +270,9 @@ class HybridBGRUModel:
         sequence_length: int = 60,
         n_price_features: int = 5,
         n_static_features: int = 50,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.3,
         device: Optional[str] = None
     ):
         """
@@ -267,11 +282,17 @@ class HybridBGRUModel:
             sequence_length: Number of time steps for sequential input (default: 60)
             n_price_features: Number of OHLCV features (default: 5)
             n_static_features: Number of static features (default: 50)
+            hidden_dim: Hidden dimension for BGRU layers (default: 128)
+            num_layers: Number of BGRU layers (default: 2)
+            dropout: Dropout probability (default: 0.3)
             device: Device to use ('cuda', 'cpu', or None for auto-detect)
         """
         self.sequence_length = sequence_length
         self.n_price_features = n_price_features
         self.n_static_features = n_static_features
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.dropout = dropout
         
         # Set device
         if device is None:
@@ -296,7 +317,8 @@ class HybridBGRUModel:
         self.logger = logging.getLogger(__name__)
         self.logger.info(
             f"Initialized HybridBGRUModel with sequence_length={sequence_length}, "
-            f"n_price_features={n_price_features}, n_static_features={n_static_features}"
+            f"n_price_features={n_price_features}, n_static_features={n_static_features}, "
+            f"hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout}"
         )
     
     def build_model(self) -> HybridBGRUNetwork:
@@ -309,11 +331,15 @@ class HybridBGRUModel:
         self.model = HybridBGRUNetwork(
             n_price_features=self.n_price_features,
             n_static_features=self.n_static_features,
-            hidden_dim=128,
-            dropout=0.3
+            hidden_dim=self.hidden_dim,
+            num_layers=self.num_layers,
+            dropout=self.dropout
         ).to(self.device)
         
-        self.logger.info(f"Model built and moved to {self.device}")
+        self.logger.info(
+            f"Model built with hidden_dim={self.hidden_dim}, "
+            f"num_layers={self.num_layers}, dropout={self.dropout}, device={self.device}"
+        )
         
         # Log parameter count
         total_params = sum(p.numel() for p in self.model.parameters())
@@ -872,6 +898,9 @@ class HybridBGRUModel:
             'sequence_length': self.sequence_length,
             'n_price_features': self.n_price_features,
             'n_static_features': self.n_static_features,
+            'hidden_dim': self.hidden_dim,
+            'num_layers': self.num_layers,
+            'dropout': self.dropout,
             'ohlcv_columns': self.ohlcv_columns,
             'static_columns': self.static_columns,
             'training_history': self.training_history,
@@ -905,6 +934,11 @@ class HybridBGRUModel:
         self.n_price_features = int(
             checkpoint.get('n_price_features', self.n_price_features)
         )
+        
+        # Load hyperparameters from checkpoint (with backward compatibility)
+        self.hidden_dim = int(checkpoint.get('hidden_dim', 128))
+        self.num_layers = int(checkpoint.get('num_layers', 2))
+        self.dropout = float(checkpoint.get('dropout', 0.3))
         
         # Load column configurations first (needed to determine n_static_features)
         # Load column configurations first
@@ -945,7 +979,8 @@ class HybridBGRUModel:
         
         self.logger.info(
             f"Loading model with n_price_features={self.n_price_features}, "
-            f"n_static_features={self.n_static_features}"
+            f"n_static_features={self.n_static_features}, hidden_dim={self.hidden_dim}, "
+            f"num_layers={self.num_layers}, dropout={self.dropout}"
         )
         
         # Build and load model

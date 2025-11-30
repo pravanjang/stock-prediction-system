@@ -43,6 +43,41 @@ from models.bgru_hybrid import (
 )
 
 
+def load_hyperparameters(
+    hyperparams_path: str = 'models/checkpoints/best_hyperparams.json'
+) -> Optional[Dict[str, Any]]:
+    """
+    Load best hyperparameters from a JSON file.
+    
+    This function reads hyperparameters saved by the hyperparameter optimization
+    process and returns them as a dictionary.
+    
+    Args:
+        hyperparams_path: Path to the hyperparameters JSON file
+        
+    Returns:
+        Dictionary of hyperparameters, or None if file doesn't exist
+    """
+    if os.path.exists(hyperparams_path):
+        try:
+            with open(hyperparams_path, 'r') as f:
+                hyperparams = json.load(f)
+            logging.getLogger(__name__).info(
+                f"Loaded hyperparameters from {hyperparams_path}"
+            )
+            return hyperparams
+        except (json.JSONDecodeError, IOError) as e:
+            logging.getLogger(__name__).warning(
+                f"Could not load hyperparameters from {hyperparams_path}: {e}"
+            )
+            return None
+    else:
+        logging.getLogger(__name__).info(
+            f"No hyperparameters file found at {hyperparams_path}, using defaults"
+        )
+        return None
+
+
 def get_all_features() -> List[str]:
     """Return all feature names for XGBoost training."""
     return OHLCV_FEATURES + TECHNICAL_FEATURES + TEMPORAL_FEATURES + PRICE_ACTION_FEATURES
@@ -71,7 +106,11 @@ class BGRUXGBoostEnsemble:
         bgru_model_path: str,
         n_features: Optional[int] = None,
         sequence_length: int = 60,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        hyperparams_path: Optional[str] = None,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.3
     ):
         """
         Initialize the Ensemble model.
@@ -86,6 +125,11 @@ class BGRUXGBoostEnsemble:
             n_features: Number of features for XGBoost. If None, determined from data.
             sequence_length: Sequence length for BGRU input (default: 60)
             device: Device for BGRU model ('cuda', 'cpu', or None for auto-detect)
+            hyperparams_path: Path to hyperparameters JSON file. If provided,
+                hyperparameters will be loaded from this file.
+            hidden_dim: Hidden dimension for BGRU (default: 128, overridden by file)
+            num_layers: Number of GRU layers (default: 2, overridden by file)
+            dropout: Dropout rate (default: 0.3, overridden by file)
         """
         self.bgru_model_path = bgru_model_path
         self.sequence_length = sequence_length
@@ -94,11 +138,37 @@ class BGRUXGBoostEnsemble:
         # Setup logging
         self.logger = logging.getLogger(__name__)
         
-        # Initialize BGRU model with default parameters
+        # Load hyperparameters from file if path provided
+        loaded_hyperparams = None
+        if hyperparams_path:
+            loaded_hyperparams = load_hyperparameters(hyperparams_path)
+        
+        # Use loaded hyperparameters if available, otherwise use provided defaults
+        if loaded_hyperparams:
+            hidden_dim = loaded_hyperparams.get('hidden_dim', hidden_dim)
+            num_layers = loaded_hyperparams.get('num_layers', num_layers)
+            dropout = loaded_hyperparams.get('dropout', dropout)
+            # Store any additional hyperparams for reference
+            self.hyperparams = loaded_hyperparams
+            self.logger.info(
+                f"Using hyperparameters: hidden_dim={hidden_dim}, "
+                f"num_layers={num_layers}, dropout={dropout}"
+            )
+        else:
+            self.hyperparams = {
+                'hidden_dim': hidden_dim,
+                'num_layers': num_layers,
+                'dropout': dropout
+            }
+        
+        # Initialize BGRU model with hyperparameters
         # n_static_features will be updated when model is loaded or data is prepared
         self.bgru_model = HybridBGRUModel(
             sequence_length=sequence_length,
-            device=device
+            device=device,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout
         )
         
         # Load trained BGRU model (this will also set correct n_static_features)
@@ -729,6 +799,12 @@ def main():
         action='store_true',
         help='Evaluate ensemble on test data'
     )
+    parser.add_argument(
+        '--hyperparams_path',
+        type=str,
+        default=None,
+        help='Path to best hyperparameters JSON file (from optimization)'
+    )
     
     args = parser.parse_args()
     
@@ -749,9 +825,18 @@ def main():
     logger.info("BGRU + XGBoost Ensemble Model")
     logger.info("=" * 60)
     
+    # Default hyperparams path if not specified
+    hyperparams_path = args.hyperparams_path
+    if hyperparams_path is None:
+        default_path = os.path.join(args.checkpoint_dir, 'best_hyperparams.json')
+        if os.path.exists(default_path):
+            hyperparams_path = default_path
+            logger.info(f"Using default hyperparameters file: {hyperparams_path}")
+    
     ensemble = BGRUXGBoostEnsemble(
         bgru_model_path=args.bgru_model,
-        sequence_length=args.sequence_length
+        sequence_length=args.sequence_length,
+        hyperparams_path=hyperparams_path
     )
     
     if args.train:

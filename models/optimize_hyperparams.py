@@ -22,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -36,6 +37,11 @@ from sklearn.utils.class_weight import compute_class_weight
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from models.bgru_base import (
     BGRUModel,
