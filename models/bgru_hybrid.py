@@ -458,7 +458,7 @@ class HybridBGRUModel:
             
             # Apply normalization if scaler exists
             if hasattr(self, 'target_mean') and hasattr(self, 'target_std'):
-                targets = (targets - self.target_mean) / (self.target_std + 1e-8)
+                targets = (targets - self.target_mean) / (self.target_std + MIN_STD)
         else:
             targets = None
         
@@ -590,10 +590,6 @@ class HybridBGRUModel:
         # Use Mean Squared Error Loss for regression
         self.logger.info("Using MSE Loss for regression")
         criterion = nn.MSELoss()
-        
-        # Alternative options (comment/uncomment as needed):
-        # criterion = nn.L1Loss()  # Mean Absolute Error - more robust to outliers
-        # criterion = nn.HuberLoss(delta=1.0)  # Combination of MSE and MAE
         
         # Training history
         self.training_history = {
@@ -841,7 +837,10 @@ class HybridBGRUModel:
             return np.array([]), np.array([])
         
         # Get current prices for reference
-        current_prices = test_df['close'].iloc[self.sequence_length-1:self.sequence_length-1+len(X_seq)].values
+        # After sequence creation, each prediction corresponds to the last element of each sequence
+        start_idx = self.sequence_length - 1
+        end_idx = start_idx + len(X_seq)
+        current_prices = test_df['close'].iloc[start_idx:end_idx].values
         
         # Convert to tensors
         X_seq_t = torch.FloatTensor(X_seq).to(self.device)
@@ -1163,7 +1162,8 @@ def main():
             mae = mean_absolute_error(actual_values, predictions)
             rmse = np.sqrt(mean_squared_error(actual_values, predictions))
             r2 = r2_score(actual_values, predictions)
-            mape = np.mean(np.abs((actual_values - predictions) / actual_values)) * 100
+            # Use epsilon to prevent division by zero in MAPE calculation
+            mape = np.mean(np.abs((actual_values - predictions) / (actual_values + MIN_STD))) * 100
             
             # Directional accuracy
             actual_direction = (actual_values > current_prices).astype(int)

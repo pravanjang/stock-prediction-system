@@ -392,12 +392,15 @@ def create_target_labels(df: pd.DataFrame, target_type: str = 'regression') -> p
     """
     df = df.copy()
     
+    # Small epsilon to prevent division by zero
+    EPSILON = 1e-8
+    
     if target_type == 'regression':
         # Predict next day's close price
         df['target'] = df['close'].shift(-1)
         
-        # Also calculate percentage change for reference
-        df['target_pct_change'] = ((df['close'].shift(-1) - df['close']) / df['close']) * 100
+        # Also calculate percentage change for reference (with epsilon to prevent div by zero)
+        df['target_pct_change'] = ((df['close'].shift(-1) - df['close']) / (df['close'] + EPSILON)) * 100
         
         logger.info(f"Created regression targets. Target range: [{df['target'].min():.2f}, {df['target'].max():.2f}]")
         logger.info(f"Target % change range: [{df['target_pct_change'].min():.2f}%, {df['target_pct_change'].max():.2f}%]")
@@ -406,7 +409,7 @@ def create_target_labels(df: pd.DataFrame, target_type: str = 'regression') -> p
         df['returns'] = df['close'].pct_change()
         df['volatility'] = df['returns'].rolling(20).std()
         df['target'] = (
-            (df['close'].shift(-1) - df['close']) / (df['volatility'] * df['close']) > 0.5
+            (df['close'].shift(-1) - df['close']) / (df['volatility'] * df['close'] + EPSILON) > 0.5
         ).astype(int)
         logger.info(f"Created classification targets. Class distribution: {df['target'].value_counts().to_dict()}")
     
