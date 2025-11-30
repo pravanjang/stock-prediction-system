@@ -1,0 +1,46 @@
+======================================================================
+=== FINAL MODEL EVALUATION ===
+======================================================================
+Generated: 2025-11-30 18:56:39
+
+Classification Metrics:
+----------------------------------------------------------------------
+✗ Accuracy: 30.4% [TARGET: 60%] - FAIL
+✗ Precision: 30.3% [TARGET: 55%] - FAIL
+✓ Recall: 100.0% [TARGET: 55%] - PASS
+✓ F1-Score: 46.5%
+✓ ROC-AUC: 0.499
+
+Per-Class Metrics:
+  Class 0 (DOWN): Precision=100.0%, Recall=0.2%
+  Class 1 (UP):   Precision=30.3%, Recall=100.0%
+
+Backtesting Results:
+----------------------------------------------------------------------
+✓ Total Return: -3.4%
+✗ Win Rate: 49.9% [TARGET: 55%] - FAIL
+✓ Profit Factor: 0.97
+✓ Max Drawdown: -578.9%
+✗ Sharpe Ratio: -0.22 [TARGET: 1.0] - FAIL
+✓ Sortino Ratio: -0.30
+✓ Total Trades: 641
+✓ Average Holding Time: 1 candle(s)
+
+Trade Statistics:
+----------------------------------------------------------------------
+  Winning Trades: 320
+  Losing Trades: 321
+  Long Trades: 640
+  Short Trades: 1
+  Avg Profit/Winning Trade: ₹11,048.81
+  Avg Loss/Losing Trade: ₹-11,306.61
+  Best Trade: ₹73,424.50
+  Worst Trade: ₹-142,867.83
+  Total P&L: ₹-93,801.67
+
+======================================================================
+SUCCESS CRITERIA SUMMARY
+======================================================================
+Overall: 1/5 criteria PASSED 
+Some criteria not met. Review model performance.
+======================================================================

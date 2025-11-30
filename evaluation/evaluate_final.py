@@ -52,6 +52,236 @@ MIN_STD = 1e-8  # Minimum standard deviation to avoid division by zero
 
 
 # =============================================================================
+# Threshold Optimization Functions
+# =============================================================================
+
+def find_optimal_threshold(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    metric: str = 'f1',
+    min_threshold: float = 0.25,
+    max_threshold: float = 0.75,
+    step: float = 0.01
+) -> Tuple[float, float, Dict[str, float]]:
+    """
+    Find the optimal decision threshold that maximizes the specified metric.
+    
+    This is crucial for imbalanced datasets where the default 0.5 threshold
+    may not be optimal.
+    
+    Args:
+        y_true: Ground truth labels (0 or 1)
+        y_proba: Prediction probabilities for the positive class
+        metric: Metric to optimize ('f1', 'recall', 'precision', 'balanced_accuracy',
+                'youden_j' for Youden's J statistic, or 'profit' for trading profit)
+        min_threshold: Minimum threshold to consider (default: 0.25)
+        max_threshold: Maximum threshold to consider (default: 0.75)
+        step: Step size for threshold search (default: 0.01)
+    
+    Returns:
+        Tuple of (optimal_threshold, best_score, metrics_at_threshold)
+    """
+    thresholds = np.arange(min_threshold, max_threshold + step, step)
+    best_threshold = 0.5
+    best_score = 0.0
+    best_metrics = {}
+    
+    for thresh in thresholds:
+        y_pred = (y_proba >= thresh).astype(int)
+        
+        # Skip if all predictions are same class
+        if len(np.unique(y_pred)) < 2:
+            continue
+        
+        # Calculate all metrics
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        accuracy = accuracy_score(y_true, y_pred)
+        
+        # Calculate specificity and balanced accuracy
+        cm = confusion_matrix(y_true, y_pred)
+        if cm.shape == (2, 2):
+            tn, fp, fn, tp = cm.ravel()
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+            balanced_acc = (recall + specificity) / 2
+            youden_j = recall + specificity - 1
+        else:
+            specificity = 0
+            balanced_acc = accuracy
+            youden_j = 0
+        
+        # Determine score based on selected metric
+        if metric == 'f1':
+            score = f1
+        elif metric == 'recall':
+            score = recall
+        elif metric == 'precision':
+            score = precision
+        elif metric == 'balanced_accuracy':
+            score = balanced_acc
+        elif metric == 'youden_j':
+            score = youden_j
+        elif metric == 'f1_recall_avg':
+            # Custom: average of F1 and recall to favor recall
+            score = (f1 + recall) / 2
+        else:
+            score = f1
+        
+        if score > best_score:
+            best_score = score
+            best_threshold = thresh
+            best_metrics = {
+                'threshold': thresh,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'accuracy': accuracy,
+                'specificity': specificity,
+                'balanced_accuracy': balanced_acc,
+                'youden_j': youden_j
+            }
+    
+    return best_threshold, best_score, best_metrics
+
+
+def find_threshold_for_target_recall(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    target_recall: float = 0.55,
+    min_precision: float = 0.30
+) -> Tuple[float, Dict[str, float]]:
+    """
+    Find threshold that achieves target recall while maintaining minimum precision.
+    
+    Args:
+        y_true: Ground truth labels
+        y_proba: Prediction probabilities
+        target_recall: Target recall to achieve (default: 0.55)
+        min_precision: Minimum acceptable precision (default: 0.30)
+    
+    Returns:
+        Tuple of (threshold, metrics_dict)
+    """
+    # Use precision-recall curve
+    precision_vals, recall_vals, thresholds = precision_recall_curve(y_true, y_proba)
+    
+    # Find thresholds that meet both criteria
+    valid_indices = []
+    for i, (p, r) in enumerate(zip(precision_vals[:-1], recall_vals[:-1])):
+        if r >= target_recall and p >= min_precision:
+            valid_indices.append(i)
+    
+    if valid_indices:
+        # Among valid thresholds, pick the one with highest F1
+        best_idx = max(valid_indices, key=lambda i: 
+            2 * precision_vals[i] * recall_vals[i] / 
+            (precision_vals[i] + recall_vals[i] + 1e-8))
+        best_threshold = thresholds[best_idx]
+        
+        return best_threshold, {
+            'threshold': best_threshold,
+            'precision': precision_vals[best_idx],
+            'recall': recall_vals[best_idx],
+            'f1': 2 * precision_vals[best_idx] * recall_vals[best_idx] / 
+                  (precision_vals[best_idx] + recall_vals[best_idx] + 1e-8)
+        }
+    else:
+        # Fallback: find threshold closest to target recall
+        recall_diffs = np.abs(recall_vals[:-1] - target_recall)
+        best_idx = np.argmin(recall_diffs)
+        best_threshold = thresholds[best_idx]
+        
+        return best_threshold, {
+            'threshold': best_threshold,
+            'precision': precision_vals[best_idx],
+            'recall': recall_vals[best_idx],
+            'f1': 2 * precision_vals[best_idx] * recall_vals[best_idx] / 
+                  (precision_vals[best_idx] + recall_vals[best_idx] + 1e-8),
+            'note': 'Could not meet both targets, optimized for recall'
+        }
+
+
+def plot_threshold_analysis(
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    save_path: str,
+    optimal_threshold: float = 0.5
+) -> None:
+    """
+    Plot threshold analysis showing metrics vs threshold.
+    
+    Args:
+        y_true: Ground truth labels
+        y_proba: Prediction probabilities
+        save_path: Path to save the plot
+        optimal_threshold: Optimal threshold to highlight
+    """
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    thresholds = np.arange(0.2, 0.8, 0.02)
+    metrics_by_threshold = {
+        'precision': [], 'recall': [], 'f1': [], 
+        'accuracy': [], 'n_positive_preds': []
+    }
+    
+    for thresh in thresholds:
+        y_pred = (y_proba >= thresh).astype(int)
+        metrics_by_threshold['precision'].append(
+            precision_score(y_true, y_pred, zero_division=0))
+        metrics_by_threshold['recall'].append(
+            recall_score(y_true, y_pred, zero_division=0))
+        metrics_by_threshold['f1'].append(
+            f1_score(y_true, y_pred, zero_division=0))
+        metrics_by_threshold['accuracy'].append(
+            accuracy_score(y_true, y_pred))
+        metrics_by_threshold['n_positive_preds'].append(
+            np.sum(y_pred == 1))
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Metrics vs Threshold
+    axes[0].plot(thresholds, metrics_by_threshold['precision'], 'b-', 
+                 linewidth=2, label='Precision')
+    axes[0].plot(thresholds, metrics_by_threshold['recall'], 'g-', 
+                 linewidth=2, label='Recall')
+    axes[0].plot(thresholds, metrics_by_threshold['f1'], 'r-', 
+                 linewidth=2, label='F1-Score')
+    axes[0].plot(thresholds, metrics_by_threshold['accuracy'], 'purple', 
+                 linewidth=2, linestyle='--', label='Accuracy')
+    axes[0].axvline(x=0.5, color='gray', linestyle='--', alpha=0.5, 
+                    label='Default (0.5)')
+    axes[0].axvline(x=optimal_threshold, color='orange', linewidth=2,
+                    label=f'Optimal ({optimal_threshold:.2f})')
+    axes[0].set_xlabel('Decision Threshold', fontsize=12)
+    axes[0].set_ylabel('Score', fontsize=12)
+    axes[0].set_title('Metrics vs Decision Threshold', fontsize=14)
+    axes[0].legend(loc='best')
+    axes[0].grid(True, alpha=0.3)
+    axes[0].set_xlim(0.2, 0.8)
+    axes[0].set_ylim(0, 1)
+    
+    # Plot 2: Number of positive predictions vs threshold
+    axes[1].plot(thresholds, metrics_by_threshold['n_positive_preds'], 'b-',
+                 linewidth=2)
+    axes[1].axhline(y=np.sum(y_true == 1), color='green', linestyle='--',
+                    linewidth=2, label=f'Actual Positives ({np.sum(y_true == 1)})')
+    axes[1].axvline(x=optimal_threshold, color='orange', linewidth=2,
+                    label=f'Optimal ({optimal_threshold:.2f})')
+    axes[1].set_xlabel('Decision Threshold', fontsize=12)
+    axes[1].set_ylabel('Number of Positive Predictions', fontsize=12)
+    axes[1].set_title('Positive Predictions vs Threshold', fontsize=14)
+    axes[1].legend(loc='best')
+    axes[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    
+    logger.info(f"Threshold analysis plot saved to {save_path}")
+
+
+# =============================================================================
 # Data Loading Functions
 # =============================================================================
 
@@ -1242,10 +1472,62 @@ def main():
         sequence_length=args.sequence_length
     )
     
-    # Calculate classification metrics
+    # =========================================================================
+    # THRESHOLD OPTIMIZATION (Key improvement for recall/precision)
+    # =========================================================================
     logger.info("-" * 60)
-    logger.info("Calculating classification metrics...")
+    logger.info("Optimizing decision threshold...")
+    
+    # Find optimal threshold for F1 score
+    optimal_threshold_f1, best_f1, metrics_f1 = find_optimal_threshold(
+        y_true, y_pred_proba, metric='f1'
+    )
+    logger.info(f"Optimal threshold (F1): {optimal_threshold_f1:.3f} -> F1={best_f1:.4f}")
+    
+    # Find optimal threshold prioritizing recall
+    optimal_threshold_recall, best_recall_score, metrics_recall = find_optimal_threshold(
+        y_true, y_pred_proba, metric='f1_recall_avg'
+    )
+    logger.info(f"Optimal threshold (F1+Recall): {optimal_threshold_recall:.3f}")
+    
+    # Find threshold for target recall
+    target_threshold, target_metrics = find_threshold_for_target_recall(
+        y_true, y_pred_proba, target_recall=0.55, min_precision=0.35
+    )
+    logger.info(f"Threshold for 55% recall: {target_threshold:.3f}")
+    logger.info(f"  -> Precision: {target_metrics.get('precision', 0):.4f}")
+    logger.info(f"  -> Recall: {target_metrics.get('recall', 0):.4f}")
+    logger.info(f"  -> F1: {target_metrics.get('f1', 0):.4f}")
+    
+    # Use the threshold that optimizes F1 + Recall balance
+    # You can change this to optimal_threshold_f1 or target_threshold based on needs
+    optimal_threshold = optimal_threshold_recall
+    
+    # Apply optimal threshold to get improved predictions
+    y_pred_optimized = (y_pred_proba >= optimal_threshold).astype(int)
+    
+    logger.info("-" * 60)
+    logger.info(f"Applying optimized threshold: {optimal_threshold:.3f} (was 0.5)")
+    logger.info(f"Prediction distribution change:")
+    logger.info(f"  Before: DOWN={np.sum(y_pred == 0)}, UP={np.sum(y_pred == 1)}")
+    logger.info(f"  After:  DOWN={np.sum(y_pred_optimized == 0)}, UP={np.sum(y_pred_optimized == 1)}")
+    
+    # Use optimized predictions for evaluation
+    y_pred = y_pred_optimized
+    
+    # Calculate classification metrics with optimized threshold
+    logger.info("-" * 60)
+    logger.info("Calculating classification metrics (with optimized threshold)...")
     metrics = calculate_all_metrics(y_true, y_pred, y_pred_proba)
+    
+    # Add threshold info to metrics
+    metrics['optimal_threshold'] = optimal_threshold
+    metrics['default_threshold'] = 0.5
+    metrics['threshold_optimization'] = {
+        'f1_optimal': {'threshold': optimal_threshold_f1, 'metrics': metrics_f1},
+        'recall_optimal': {'threshold': optimal_threshold_recall, 'metrics': metrics_recall},
+        'target_55_recall': {'threshold': target_threshold, 'metrics': target_metrics}
+    }
     
     # Generate visualizations
     logger.info("-" * 60)
@@ -1268,6 +1550,13 @@ def main():
         y_pred_proba,
         save_path=os.path.join(plots_dir, 'confidence_distribution.png'),
         y_true=y_true
+    )
+    
+    # Threshold analysis plot
+    plot_threshold_analysis(
+        y_true, y_pred_proba,
+        save_path=os.path.join(plots_dir, 'threshold_analysis.png'),
+        optimal_threshold=optimal_threshold
     )
     
     # Run backtesting

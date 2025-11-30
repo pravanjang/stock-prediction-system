@@ -1,3 +1,4 @@
+returns
 stoch_d
 adx_14
 momentum_10
@@ -27,7 +28,6 @@ is_doji
 is_hammer
 is_shooting_star
 is_inside_bar
-return_1
 return_5
 return_15
 return_30

@@ -304,6 +304,154 @@ def add_volatility_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_momentum_signals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add momentum-based signal features to better capture UP moves.
+    
+    These features are specifically designed to improve recall for
+    bullish (UP) predictions by identifying momentum-based patterns.
+    
+    Features:
+    - RSI Divergence: Detects divergence between price and RSI
+    - MACD Crossover: Identifies MACD line crossing above signal
+    - Volume Spike: Detects unusual volume relative to average
+    - Price Momentum Score: Combined momentum indicator
+    - Trend Strength: Measures strength of current trend
+    - Breakout Signal: Identifies potential breakout conditions
+    
+    Args:
+        df: DataFrame with OHLC and volume data
+    
+    Returns:
+        DataFrame with momentum signal features added
+    """
+    logger.info("Adding momentum signal features...")
+    
+    # Ensure required indicators exist
+    if 'rsi_14' not in df.columns:
+        df['rsi_14'] = ta.rsi(df['close'], length=14)
+    
+    # 1. RSI Divergence Detection
+    # Bullish divergence: price makes lower low, RSI makes higher low
+    price_change_5 = df['close'].diff(5)
+    rsi_change_5 = df['rsi_14'].diff(5)
+    
+    # Bullish divergence (price down, RSI up) - potential UP move
+    df['rsi_bullish_divergence'] = (
+        (price_change_5 < 0) & (rsi_change_5 > 0) & (df['rsi_14'] < 40)
+    ).astype(int)
+    
+    # Bearish divergence (price up, RSI down) - potential reversal
+    df['rsi_bearish_divergence'] = (
+        (price_change_5 > 0) & (rsi_change_5 < 0) & (df['rsi_14'] > 60)
+    ).astype(int)
+    
+    # 2. MACD Crossover Detection
+    if 'macd' not in df.columns:
+        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+        if macd is not None:
+            df['macd'] = macd['MACD_12_26_9']
+            df['macd_signal'] = macd['MACDs_12_26_9']
+    
+    # MACD crosses above signal line (bullish)
+    macd_prev = df['macd'].shift(1)
+    signal_prev = df['macd_signal'].shift(1)
+    df['macd_bullish_cross'] = (
+        (macd_prev <= signal_prev) & (df['macd'] > df['macd_signal'])
+    ).astype(int)
+    
+    # MACD crosses below signal line (bearish)
+    df['macd_bearish_cross'] = (
+        (macd_prev >= signal_prev) & (df['macd'] < df['macd_signal'])
+    ).astype(int)
+    
+    # 3. Volume Spike Detection
+    if 'volume_sma_20' not in df.columns:
+        df['volume_sma_20'] = ta.sma(df['volume'], length=20)
+    
+    # Volume spike: volume > 1.5x average
+    df['volume_spike'] = (
+        df['volume'] > df['volume_sma_20'] * 1.5
+    ).astype(int)
+    
+    # High volume breakout: volume spike with positive close
+    df['high_volume_up'] = (
+        (df['volume'] > df['volume_sma_20'] * 1.5) & 
+        (df['close'] > df['open'])
+    ).astype(int)
+    
+    # 4. Price Momentum Score (composite indicator)
+    # Combine multiple momentum factors
+    momentum_10 = df['close'].diff(10) / df['close'].shift(10) * 100
+    momentum_5 = df['close'].diff(5) / df['close'].shift(5) * 100
+    momentum_3 = df['close'].diff(3) / df['close'].shift(3) * 100
+    
+    # Weighted momentum score
+    df['momentum_score'] = (
+        0.5 * momentum_3 + 0.3 * momentum_5 + 0.2 * momentum_10
+    )
+    
+    # 5. Trend Strength Indicator
+    # Based on EMA alignment and ADX
+    if 'ema_9' not in df.columns:
+        df['ema_9'] = ta.ema(df['close'], length=9)
+    if 'ema_21' not in df.columns:
+        df['ema_21'] = ta.ema(df['close'], length=21)
+    if 'ema_50' not in df.columns:
+        df['ema_50'] = ta.ema(df['close'], length=50)
+    
+    # Bullish trend: EMA9 > EMA21 > EMA50
+    df['ema_bullish_alignment'] = (
+        (df['ema_9'] > df['ema_21']) & (df['ema_21'] > df['ema_50'])
+    ).astype(int)
+    
+    # Bearish trend: EMA9 < EMA21 < EMA50
+    df['ema_bearish_alignment'] = (
+        (df['ema_9'] < df['ema_21']) & (df['ema_21'] < df['ema_50'])
+    ).astype(int)
+    
+    # 6. Breakout Signal
+    # Price breaks above recent high with volume confirmation
+    rolling_high_20 = df['high'].rolling(window=20).max().shift(1)
+    rolling_low_20 = df['low'].rolling(window=20).min().shift(1)
+    
+    df['breakout_up'] = (
+        (df['close'] > rolling_high_20) & 
+        (df['volume'] > df['volume_sma_20'])
+    ).astype(int)
+    
+    df['breakout_down'] = (
+        (df['close'] < rolling_low_20) & 
+        (df['volume'] > df['volume_sma_20'])
+    ).astype(int)
+    
+    # 7. RSI Momentum Zones
+    # Oversold recovery potential
+    df['rsi_oversold'] = (df['rsi_14'] < 30).astype(int)
+    df['rsi_overbought'] = (df['rsi_14'] > 70).astype(int)
+    
+    # RSI entering momentum zone (30-70 crossing)
+    rsi_prev = df['rsi_14'].shift(1)
+    df['rsi_momentum_entry'] = (
+        (rsi_prev < 30) & (df['rsi_14'] >= 30)
+    ).astype(int)
+    
+    # 8. Combined UP Signal Score (for model training)
+    # Higher score = more bullish signals
+    df['bullish_signal_count'] = (
+        df['rsi_bullish_divergence'] +
+        df['macd_bullish_cross'] +
+        df['high_volume_up'] +
+        df['ema_bullish_alignment'] +
+        df['breakout_up'] +
+        df['rsi_momentum_entry']
+    )
+    
+    logger.info("Added 15 momentum signal features")
+    
+    return df
+
+
 def handle_nan_values(df: pd.DataFrame, indicator_columns: list) -> pd.DataFrame:
     """
     Handle NaN values in indicator columns.
@@ -440,6 +588,7 @@ def add_technical_indicators(df: pd.DataFrame, normalize: bool = True,
     df = add_trend_indicators(df)
     df = add_volume_indicators(df)
     df = add_volatility_indicators(df)
+    df = add_momentum_signals(df)  # New momentum-based features for better recall
     
     # Get list of new indicator columns
     indicator_columns = [col for col in df.columns if col not in original_columns]
@@ -502,7 +651,16 @@ def get_indicator_columns() -> list:
         'volume_sma_20', 'volume_roc_10',
         'obv', 'vwap', 'mfi_14',
         # Volatility
-        'atr_14', 'hist_vol_20', 'bb_width_pct'
+        'atr_14', 'hist_vol_20', 'bb_width_pct',
+        # Momentum Signals (new features for improved recall)
+        'rsi_bullish_divergence', 'rsi_bearish_divergence',
+        'macd_bullish_cross', 'macd_bearish_cross',
+        'volume_spike', 'high_volume_up',
+        'momentum_score',
+        'ema_bullish_alignment', 'ema_bearish_alignment',
+        'breakout_up', 'breakout_down',
+        'rsi_oversold', 'rsi_overbought', 'rsi_momentum_entry',
+        'bullish_signal_count'
     ]
 
 

@@ -1,0 +1,6 @@
+{
+  "bgru_weight": 0.2,
+  "xgb_weight": 0.8,
+  "stacking_trained": true,
+  "saved_at": "2025-11-30T18:54:27.749681"
+}

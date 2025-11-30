@@ -309,32 +309,42 @@ class BGRUXGBoostEnsemble:
         self,
         train_df: pd.DataFrame,
         val_df: pd.DataFrame,
-        max_depth: int = 6,
-        learning_rate: float = 0.1,
-        n_estimators: int = 100,
+        max_depth: int = 4,
+        learning_rate: float = 0.05,
+        n_estimators: int = 200,
         subsample: float = 0.8,
         colsample_bytree: float = 0.8,
+        min_child_weight: int = 3,
+        reg_alpha: float = 0.1,
+        reg_lambda: float = 1.0,
+        scale_pos_weight_multiplier: float = 1.5,
         random_state: int = 42,
         verbose: bool = False
     ) -> Dict[str, float]:
         """
         Train XGBoost on technical + temporal + price action features.
         
-        Hyperparameters:
-            - max_depth: 6
-            - learning_rate: 0.1
-            - n_estimators: 100
-            - subsample: 0.8
-            - colsample_bytree: 0.8
+        Improved Hyperparameters for better generalization:
+            - max_depth: 4 (reduced from 6 to prevent overfitting)
+            - learning_rate: 0.05 (reduced for more gradual learning)
+            - n_estimators: 200 (increased for better ensemble)
+            - min_child_weight: 3 (regularization)
+            - reg_alpha: 0.1 (L1 regularization)
+            - reg_lambda: 1.0 (L2 regularization)
+            - scale_pos_weight_multiplier: 1.5 (more aggressive minority class weight)
         
         Args:
             train_df: Training DataFrame
             val_df: Validation DataFrame
-            max_depth: Maximum depth of trees (default: 6)
-            learning_rate: Learning rate (default: 0.1)
-            n_estimators: Number of boosting rounds (default: 100)
+            max_depth: Maximum depth of trees (default: 4)
+            learning_rate: Learning rate (default: 0.05)
+            n_estimators: Number of boosting rounds (default: 200)
             subsample: Subsample ratio of training instances (default: 0.8)
             colsample_bytree: Subsample ratio of columns (default: 0.8)
+            min_child_weight: Minimum sum of instance weight in child (default: 3)
+            reg_alpha: L1 regularization term (default: 0.1)
+            reg_lambda: L2 regularization term (default: 1.0)
+            scale_pos_weight_multiplier: Multiplier for minority class weight (default: 1.5)
             random_state: Random seed (default: 42)
             verbose: Whether to print training progress (default: False)
         
@@ -356,25 +366,31 @@ class BGRUXGBoostEnsemble:
         self.logger.info(f"Validation samples: {len(X_val)}")
         self.logger.info(f"Features: {len(self.feature_columns)}")
         
-        # Calculate class weights
+        # Calculate class weights with multiplier for more aggressive minority handling
         n_pos = np.sum(y_train == 1)
         n_neg = np.sum(y_train == 0)
-        scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+        base_scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+        scale_pos_weight = base_scale_pos_weight * scale_pos_weight_multiplier
         
         self.logger.info(f"Class distribution: {n_neg} negative, {n_pos} positive")
-        self.logger.info(f"Scale pos weight: {scale_pos_weight:.4f}")
+        self.logger.info(f"Base scale pos weight: {base_scale_pos_weight:.4f}")
+        self.logger.info(f"Applied scale pos weight (with {scale_pos_weight_multiplier}x multiplier): {scale_pos_weight:.4f}")
         
-        # Initialize XGBoost classifier
+        # Initialize XGBoost classifier with improved regularization
         self.xgb_model = xgb.XGBClassifier(
             max_depth=max_depth,
             learning_rate=learning_rate,
             n_estimators=n_estimators,
             subsample=subsample,
             colsample_bytree=colsample_bytree,
+            min_child_weight=min_child_weight,
+            reg_alpha=reg_alpha,
+            reg_lambda=reg_lambda,
             scale_pos_weight=scale_pos_weight,
             random_state=random_state,
             objective='binary:logistic',
-            eval_metric='logloss'
+            eval_metric='logloss',
+            use_label_encoder=False
         )
         
         # Train with early stopping
@@ -534,7 +550,9 @@ class BGRUXGBoostEnsemble:
         self,
         val_df: pd.DataFrame,
         batch_size: int = 64,
-        method: str = 'grid_search'
+        method: str = 'grid_search',
+        optimize_for: str = 'f1',
+        min_weight: float = 0.2
     ) -> List[float]:
         """
         Find optimal ensemble weights using validation set.
@@ -546,10 +564,14 @@ class BGRUXGBoostEnsemble:
             val_df: Validation DataFrame
             batch_size: Batch size for BGRU inference
             method: Optimization method ('grid_search' or 'scipy')
+            optimize_for: Metric to optimize ('accuracy', 'f1', 'recall', 'balanced')
+            min_weight: Minimum weight for each model to ensure both contribute (default: 0.2)
         
         Returns:
             Optimal weights [bgru_weight, xgb_weight]
         """
+        from sklearn.metrics import f1_score, recall_score, precision_score
+        
         self.logger.info("=" * 60)
         self.logger.info("Optimizing Ensemble Weights")
         self.logger.info("=" * 60)
@@ -571,59 +593,102 @@ class BGRUXGBoostEnsemble:
         targets = targets[:min_len]
         
         # Log individual model performance
-        bgru_acc = accuracy_score(targets, (bgru_probs >= 0.5).astype(int))
-        xgb_acc = accuracy_score(targets, (xgb_probs >= 0.5).astype(int))
-        self.logger.info(f"BGRU Validation Accuracy: {bgru_acc:.4f}")
-        self.logger.info(f"XGBoost Validation Accuracy: {xgb_acc:.4f}")
+        bgru_preds = (bgru_probs >= 0.5).astype(int)
+        xgb_preds = (xgb_probs >= 0.5).astype(int)
         
-        # Train stacking model
+        bgru_acc = accuracy_score(targets, bgru_preds)
+        xgb_acc = accuracy_score(targets, xgb_preds)
+        bgru_f1 = f1_score(targets, bgru_preds, zero_division=0)
+        xgb_f1 = f1_score(targets, xgb_preds, zero_division=0)
+        bgru_recall = recall_score(targets, bgru_preds, zero_division=0)
+        xgb_recall = recall_score(targets, xgb_preds, zero_division=0)
+        
+        self.logger.info(f"BGRU - Accuracy: {bgru_acc:.4f}, F1: {bgru_f1:.4f}, Recall: {bgru_recall:.4f}")
+        self.logger.info(f"XGBoost - Accuracy: {xgb_acc:.4f}, F1: {xgb_f1:.4f}, Recall: {xgb_recall:.4f}")
+        
+        # Train stacking model with class weight balancing
         self.logger.info("Training stacking model...")
         stacked_features = np.column_stack([bgru_probs, xgb_probs])
-        self.stacking_model = LogisticRegression(random_state=42, max_iter=1000)
+        self.stacking_model = LogisticRegression(
+            random_state=42, 
+            max_iter=1000,
+            class_weight='balanced'  # Handle class imbalance
+        )
         self.stacking_model.fit(stacked_features, targets)
-        stacking_acc = accuracy_score(targets, self.stacking_model.predict(stacked_features))
-        self.logger.info(f"Stacking model accuracy: {stacking_acc:.4f}")
+        stacking_preds = self.stacking_model.predict(stacked_features)
+        stacking_acc = accuracy_score(targets, stacking_preds)
+        stacking_f1 = f1_score(targets, stacking_preds, zero_division=0)
+        stacking_recall = recall_score(targets, stacking_preds, zero_division=0)
+        self.logger.info(f"Stacking - Accuracy: {stacking_acc:.4f}, F1: {stacking_f1:.4f}, Recall: {stacking_recall:.4f}")
         
-        # Optimize weighted average
-        best_weights = [0.6, 0.4]
-        best_acc = 0.0
+        # Optimize weighted average with minimum weight constraint
+        best_weights = [0.5, 0.5]  # Start with equal weights
+        best_score = 0.0
+        
+        def compute_score(preds, targets, metric):
+            if metric == 'accuracy':
+                return accuracy_score(targets, preds)
+            elif metric == 'f1':
+                return f1_score(targets, preds, zero_division=0)
+            elif metric == 'recall':
+                return recall_score(targets, preds, zero_division=0)
+            elif metric == 'balanced':
+                # Balance of F1 and recall
+                f1 = f1_score(targets, preds, zero_division=0)
+                rec = recall_score(targets, preds, zero_division=0)
+                return (f1 + rec) / 2
+            else:
+                return accuracy_score(targets, preds)
         
         if method == 'grid_search':
-            # Grid search over weight combinations
-            for w in np.arange(0.0, 1.01, 0.05):
+            # Grid search over weight combinations with minimum weight constraint
+            self.logger.info(f"Optimizing for {optimize_for} with min_weight={min_weight}")
+            for w in np.arange(min_weight, 1.0 - min_weight + 0.01, 0.05):
                 weights = [w, 1 - w]
                 combined = weights[0] * bgru_probs + weights[1] * xgb_probs
                 preds = (combined >= 0.5).astype(int)
-                acc = accuracy_score(targets, preds)
+                score = compute_score(preds, targets, optimize_for)
                 
-                if acc > best_acc:
-                    best_acc = acc
+                if score > best_score:
+                    best_score = score
                     best_weights = weights.copy()
                     
         elif method == 'scipy':
-            # Scipy optimization
-            def neg_accuracy(w):
-                w_bgru = w[0]
+            # Scipy optimization with minimum weight constraint
+            def neg_score(w):
+                w_bgru = max(min_weight, min(1 - min_weight, w[0]))
                 w_xgb = 1 - w_bgru
                 combined = w_bgru * bgru_probs + w_xgb * xgb_probs
                 preds = (combined >= 0.5).astype(int)
-                return -accuracy_score(targets, preds)
+                return -compute_score(preds, targets, optimize_for)
             
             result = minimize(
-                neg_accuracy,
+                neg_score,
                 x0=[0.5],
-                bounds=[(0, 1)],
+                bounds=[(min_weight, 1 - min_weight)],
                 method='L-BFGS-B'
             )
             
             best_weights = [result.x[0], 1 - result.x[0]]
-            best_acc = -result.fun
+            best_score = -result.fun
         
         self.weights = best_weights
         
+        # Calculate final metrics with best weights
+        final_combined = best_weights[0] * bgru_probs + best_weights[1] * xgb_probs
+        final_preds = (final_combined >= 0.5).astype(int)
+        final_acc = accuracy_score(targets, final_preds)
+        final_f1 = f1_score(targets, final_preds, zero_division=0)
+        final_recall = recall_score(targets, final_preds, zero_division=0)
+        final_precision = precision_score(targets, final_preds, zero_division=0)
+        
         self.logger.info("-" * 60)
         self.logger.info(f"Optimal weights: BGRU={best_weights[0]:.4f}, XGBoost={best_weights[1]:.4f}")
-        self.logger.info(f"Weighted average accuracy: {best_acc:.4f}")
+        self.logger.info(f"Ensemble metrics ({optimize_for} optimized):")
+        self.logger.info(f"  Accuracy: {final_acc:.4f}")
+        self.logger.info(f"  F1-Score: {final_f1:.4f}")
+        self.logger.info(f"  Recall: {final_recall:.4f}")
+        self.logger.info(f"  Precision: {final_precision:.4f}")
         self.logger.info("=" * 60)
         
         return best_weights

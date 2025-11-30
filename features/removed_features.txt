@@ -9,7 +9,9 @@ bb_middle
 bb_width
 ema_50
 bb_lower
+volatility
 low
+return_1
 rsi_21
 macd
 volume_roc_10

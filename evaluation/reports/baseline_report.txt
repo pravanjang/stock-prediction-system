@@ -1,65 +1,67 @@
 ======================================================================
 BGRU BASELINE MODEL EVALUATION REPORT
 ======================================================================
-Generated: 2025-11-29 10:02:30
+Generated: 2025-11-30 18:15:51
 
 ----------------------------------------------------------------------
 CLASSIFICATION METRICS
 ----------------------------------------------------------------------
 Total Samples:      621
-Correct Predictions: 330
-Incorrect Predictions: 291
+Correct Predictions: 434
+Incorrect Predictions: 187
 
-Accuracy:           0.5314 (53.14%)
-Precision:          0.5314
-Recall:             1.0000
-F1-Score:           0.6940
-ROC-AUC:            0.4865
-Specificity:        0.0000
+Accuracy:           0.6989 (69.89%)
+Precision:          0.0000
+Recall:             0.0000
+F1-Score:           0.0000
+ROC-AUC:            0.5000
+Specificity:        1.0000
 
 Confusion Matrix:
-  True Negatives:   0
-  False Positives:  291
-  False Negatives:  0
-  True Positives:   330
+  True Negatives:   434
+  False Positives:  0
+  False Negatives:  187
+  True Positives:   0
 
 Class Distribution:
-  Ground Truth: {0: 291, 1: 330}
-  Predictions:  {1: 621}
+  Ground Truth: {0: 434, 1: 187}
+  Predictions:  {0: 621}
 
 ----------------------------------------------------------------------
 TRADING SIMULATION RESULTS
 ----------------------------------------------------------------------
 Total Trades:       621
-Total PnL:          ₹-50,845.30
-Total Return:       -5.02%
-Win Rate:           49.44%
-Max Drawdown:       ₹158,003.36
-Max Drawdown %:     948.89%
-Avg Trade PnL:      ₹-81.88
-Avg Trade Return:   -0.0081%
-Sharpe Ratio:       -0.1393
-Profitable Trades:  307
-Losing Trades:      314
-Long Trades:        621
-Short Trades:       0
-Best Trade:         ₹31,467.64
-Worst Trade:        ₹-61,229.07
+Total PnL:          ₹-509,873.80
+Total Return:       -69.50%
+Win Rate:           43.80%
+Max Drawdown:       ₹520,005.58
+Max Drawdown %:     5132.42%
+Avg Trade PnL:      ₹-821.05
+Avg Trade Return:   -0.1119%
+Sharpe Ratio:       -1.9287
+Profitable Trades:  272
+Losing Trades:      349
+Long Trades:        0
+Short Trades:       621
+Best Trade:         ₹60,311.43
+Worst Trade:        ₹-32,312.36
 
 ----------------------------------------------------------------------
 SUCCESS CRITERIA CHECK
 ----------------------------------------------------------------------
-Test Accuracy > 53%:        PASS ✓ (53.14%)
-Precision > 50%:            PASS ✓ (53.14%)
-Recall > 50%:               PASS ✓ (100.00%)
-Train-Val Gap < 5%:         PASS ✓ (4.61%)
-  (Train Acc: 49.51%, Val Acc: 54.12%)
+Test Accuracy > 53%:        PASS ✓ (69.89%)
+Precision > 50%:            FAIL ✗ (0.00%)
+Recall > 50%:               FAIL ✗ (0.00%)
+Train-Val Gap < 5%:         PASS ✓ (0.87%)
+  (Train Acc: 68.99%, Val Acc: 68.12%)
 
 ----------------------------------------------------------------------
 OVERALL ASSESSMENT
 ----------------------------------------------------------------------
-Status: BASELINE ACHIEVED ✓
-The model meets minimum baseline requirements for Phase 1.
+Status: BASELINE NOT MET ✗
+The model does not meet all baseline requirements.
+Consider:
+  - Adjusting class weights or decision threshold
 
 ======================================================================
 END OF REPORT

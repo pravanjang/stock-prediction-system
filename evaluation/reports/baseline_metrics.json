@@ -1,49 +1,49 @@
 {
   "classification_metrics": {
-    "accuracy": 0.5314009661835749,
-    "precision": 0.5314009661835749,
-    "recall": 1.0,
-    "f1_score": 0.694006309148265,
-    "roc_auc": 0.4865094241382902,
-    "true_negatives": 0,
-    "false_positives": 291,
-    "false_negatives": 0,
-    "true_positives": 330,
-    "specificity": 0.0,
+    "accuracy": 0.6988727858293076,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1_score": 0.0,
+    "roc_auc": 0.5,
+    "true_negatives": 434,
+    "false_positives": 0,
+    "false_negatives": 187,
+    "true_positives": 0,
+    "specificity": 1.0,
     "prediction_distribution": {
-      "1": 621
+      "0": 621
     },
     "ground_truth_distribution": {
-      "0": 291,
-      "1": 330
+      "0": 434,
+      "1": 187
     },
     "total_samples": 621,
-    "correct_predictions": 330,
-    "incorrect_predictions": 291
+    "correct_predictions": 434,
+    "incorrect_predictions": 187
   },
   "trading_results": {
     "total_trades": 621,
-    "total_pnl": -50845.30124999998,
-    "total_return": -5.020387175503893,
-    "win_rate": 49.43639291465378,
-    "max_drawdown": 158003.36235000007,
-    "max_drawdown_pct": 948.8941036716927,
-    "avg_trade_pnl": -81.87649154589357,
-    "avg_trade_return": -0.00808435938084361,
+    "total_pnl": -509873.80125,
+    "total_return": -69.49961282449615,
+    "win_rate": 43.80032206119163,
+    "max_drawdown": 520005.57810000004,
+    "max_drawdown_pct": 5132.422336167027,
+    "avg_trade_pnl": -821.0528200483093,
+    "avg_trade_return": -0.11191564061915638,
     "std_trade_return": 0.9211231290713172,
-    "profitable_trades": 307,
-    "losing_trades": 314,
-    "long_trades": 621,
-    "short_trades": 0,
-    "best_trade": 31467.6426,
-    "worst_trade": -61229.06954999998,
-    "sharpe_ratio": -0.13932472493150214
+    "profitable_trades": 272,
+    "losing_trades": 349,
+    "long_trades": 0,
+    "short_trades": 621,
+    "best_trade": 60311.43044999998,
+    "worst_trade": -32312.3574,
+    "sharpe_ratio": -1.928738581531207
   },
   "evaluation_config": {
     "model_path": "models/checkpoints/bgru_baseline.pt",
     "data_path": "data/processed/test.csv",
     "sequence_length": 60,
     "transaction_cost": 0.0003,
-    "evaluated_at": "2025-11-29T10:02:30.777479"
+    "evaluated_at": "2025-11-30T18:15:51.584636"
   }
 }

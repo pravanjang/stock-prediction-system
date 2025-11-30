@@ -27,6 +27,13 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
+# Optional: SMOTE for oversampling
+try:
+    from imblearn.over_sampling import SMOTE
+    SMOTE_AVAILABLE = True
+except ImportError:
+    SMOTE_AVAILABLE = False
+
 # Constants
 MIN_STD = 1e-8  # Minimum standard deviation to avoid division by zero
 
@@ -41,7 +48,15 @@ TECHNICAL_FEATURES = [
     'supertrend_10_3', 'supertrend_7_2',
     'bb_upper', 'bb_middle', 'bb_lower', 'bb_width',
     'psar', 'volume_sma_20', 'volume_roc_10', 'obv', 'vwap',
-    'mfi_14', 'atr_14', 'hist_vol_20', 'bb_width_pct'
+    'mfi_14', 'atr_14', 'hist_vol_20', 'bb_width_pct',
+    # Momentum signal features for improved recall
+    'rsi_bullish_divergence', 'rsi_bearish_divergence',
+    'macd_bullish_cross', 'macd_bearish_cross',
+    'volume_spike', 'high_volume_up', 'momentum_score',
+    'ema_bullish_alignment', 'ema_bearish_alignment',
+    'breakout_up', 'breakout_down',
+    'rsi_oversold', 'rsi_overbought', 'rsi_momentum_entry',
+    'bullish_signal_count'
 ]
 
 # Temporal features for static path
@@ -77,6 +92,73 @@ NO_NORMALIZE_FEATURES = [
     'is_bullish_engulf', 'is_bearish_engulf', 'is_doji', 'is_hammer',
     'is_shooting_star', 'is_inside_bar', 'tick_direction'
 ]
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for handling class imbalance.
+    
+    Focal Loss reduces the relative loss for well-classified examples,
+    putting more focus on hard, misclassified examples.
+    
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    
+    Args:
+        alpha: Weighting factor for the rare class (default: 0.25)
+        gamma: Focusing parameter that reduces loss for easy examples (default: 2.0)
+        reduction: 'mean', 'sum', or 'none' (default: 'mean')
+    """
+    
+    def __init__(
+        self,
+        alpha: float = 0.25,
+        gamma: float = 2.0,
+        reduction: str = 'mean'
+    ):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+    
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Forward pass for focal loss calculation.
+        
+        Args:
+            inputs: Predicted probabilities (sigmoid output), shape [batch, 1]
+            targets: Ground truth labels (0 or 1), shape [batch, 1]
+        
+        Returns:
+            Focal loss value
+        """
+        # Clamp inputs to avoid log(0)
+        inputs = torch.clamp(inputs, min=1e-7, max=1 - 1e-7)
+        
+        # Binary cross entropy
+        bce_loss = nn.functional.binary_cross_entropy(
+            inputs, targets, reduction='none'
+        )
+        
+        # Calculate p_t
+        p_t = inputs * targets + (1 - inputs) * (1 - targets)
+        
+        # Calculate alpha_t (higher weight for minority class)
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        # Apply focal modulation
+        focal_weight = alpha_t * (1 - p_t) ** self.gamma
+        focal_loss = focal_weight * bce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 def get_static_features() -> List[str]:
@@ -508,7 +590,13 @@ class HybridBGRUModel:
         epochs: int = 50,
         batch_size: int = 64,
         checkpoint_dir: str = 'models/checkpoints/',
-        log_dir: str = 'models/logs/'
+        log_dir: str = 'models/logs/',
+        use_focal_loss: bool = True,
+        focal_alpha: float = 0.7,
+        focal_gamma: float = 2.0,
+        use_smote: bool = True,
+        smote_ratio: float = 0.7,
+        class_weight_multiplier: float = 1.5
     ) -> Dict[str, List[float]]:
         """
         Train the Hybrid BGRU model with two-phase approach.
@@ -523,6 +611,12 @@ class HybridBGRUModel:
             batch_size: Batch size (default: 64)
             checkpoint_dir: Directory to save model checkpoints
             log_dir: Directory to save training logs
+            use_focal_loss: Use Focal Loss instead of BCE (default: True)
+            focal_alpha: Alpha parameter for Focal Loss (default: 0.7)
+            focal_gamma: Gamma parameter for Focal Loss (default: 2.0)
+            use_smote: Use SMOTE for minority class oversampling (default: True)
+            smote_ratio: Target ratio for SMOTE (default: 0.7)
+            class_weight_multiplier: Multiplier for class weights (default: 1.5)
         
         Returns:
             Dictionary containing training history
@@ -572,6 +666,53 @@ class HybridBGRUModel:
         self._log_class_distribution(y_train, split='Train')
         class_weights = self._compute_class_weights(y_train)
         
+        # Apply SMOTE for minority class oversampling if enabled
+        if use_smote and SMOTE_AVAILABLE:
+            self.logger.info(f"Applying SMOTE with target ratio {smote_ratio}...")
+            try:
+                # Combine static features for SMOTE
+                # We can't directly SMOTE sequences, so we duplicate corresponding sequences
+                smote = SMOTE(sampling_strategy=smote_ratio, random_state=42)
+                X_static_resampled, y_resampled = smote.fit_resample(X_static_train, y_train)
+                
+                # For sequences, we need to duplicate corresponding indices
+                # Get the new indices based on resampling
+                n_original = len(y_train)
+                n_new = len(y_resampled)
+                
+                if n_new > n_original:
+                    # Calculate how many synthetic samples were added
+                    n_synthetic = n_new - n_original
+                    
+                    # Get indices of minority class samples
+                    minority_indices = np.where(y_train == 1)[0]
+                    
+                    # Randomly sample with replacement to duplicate sequences
+                    np.random.seed(42)
+                    duplicate_indices = np.random.choice(
+                        minority_indices, size=n_synthetic, replace=True
+                    )
+                    
+                    # Concatenate original and duplicated sequences
+                    X_seq_train = np.concatenate(
+                        [X_seq_train, X_seq_train[duplicate_indices]], axis=0
+                    )
+                    X_static_train = X_static_resampled
+                    y_train = y_resampled
+                    
+                    self.logger.info(
+                        f"SMOTE applied: {n_original} -> {n_new} samples "
+                        f"(added {n_synthetic} synthetic minority samples)"
+                    )
+                    self._log_class_distribution(y_train, split='After SMOTE')
+            except Exception as e:
+                self.logger.warning(f"SMOTE failed: {e}. Continuing without oversampling.")
+        elif use_smote and not SMOTE_AVAILABLE:
+            self.logger.warning(
+                "SMOTE requested but imblearn not installed. "
+                "Install with: pip install imbalanced-learn"
+            )
+        
         # Convert to tensors
         X_seq_train_t = torch.FloatTensor(X_seq_train).to(self.device)
         X_static_train_t = torch.FloatTensor(X_static_train).to(self.device)
@@ -592,22 +733,37 @@ class HybridBGRUModel:
             val_dataset, batch_size=batch_size, shuffle=False
         )
         
-        # Loss function with class weights
-        neg_weight = torch.clamp(class_weights[0], min=MIN_STD)
-        pos_weight = class_weights[1] / neg_weight
-        
-        def weighted_bce_loss(
-            outputs: torch.Tensor,
-            targets: torch.Tensor
-        ) -> torch.Tensor:
-            weights = torch.ones_like(targets)
-            weights[targets == 1] = pos_weight
-            bce = nn.functional.binary_cross_entropy(
-                outputs, targets, reduction='none'
+        # Loss function selection
+        if use_focal_loss:
+            # Use Focal Loss for better handling of class imbalance
+            # Higher alpha gives more weight to positive (minority) class
+            self.logger.info(
+                f"Using Focal Loss with alpha={focal_alpha}, gamma={focal_gamma}"
             )
-            return (bce * weights).mean()
-        
-        criterion = weighted_bce_loss
+            criterion = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+        else:
+            # Use weighted BCE with aggressive class weights
+            neg_weight = torch.clamp(class_weights[0], min=MIN_STD)
+            # Apply multiplier for more aggressive weighting
+            pos_weight = (class_weights[1] / neg_weight) * class_weight_multiplier
+            
+            self.logger.info(
+                f"Using Weighted BCE with pos_weight={pos_weight:.4f} "
+                f"(multiplier={class_weight_multiplier})"
+            )
+            
+            def weighted_bce_loss(
+                outputs: torch.Tensor,
+                targets: torch.Tensor
+            ) -> torch.Tensor:
+                weights = torch.ones_like(targets)
+                weights[targets == 1] = pos_weight
+                bce = nn.functional.binary_cross_entropy(
+                    outputs, targets, reduction='none'
+                )
+                return (bce * weights).mean()
+            
+            criterion = weighted_bce_loss
         
         # Training history
         self.training_history = {
