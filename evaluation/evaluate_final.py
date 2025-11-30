@@ -486,7 +486,8 @@ def backtest_trading_strategy(
     proba: np.ndarray,
     sequence_length: int = 60,
     lot_size: int = 25,
-    transaction_cost: float = 0.0003
+    transaction_cost: float = 0.0003,
+    trades_csv_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Comprehensive backtesting for BankNifty futures.
@@ -611,6 +612,19 @@ def backtest_trading_strategy(
         return _empty_backtest_results()
     
     trades_df = pd.DataFrame(trades)
+
+    # Save trades to CSV if requested or default path set
+    if trades_df is not None and not trades_df.empty:
+        if trades_csv_path is None:
+            # Default path inside evaluation reports
+            trades_csv_path = os.path.join('evaluation', 'reports', 'backtest_trades.csv')
+        # Ensure directory exists
+        Path(trades_csv_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            trades_df.to_csv(trades_csv_path, index=False)
+            logger.info(f"Saved backtest trades to {trades_csv_path}")
+        except Exception as e:
+            logger.warning(f"Could not save trades to CSV: {e}")
     
     # Basic statistics
     total_trades = len(trades)
@@ -689,6 +703,9 @@ def backtest_trading_strategy(
         'drawdown_curve': drawdown_curve,
         'trades_df': trades_df
     }
+    # Add saved CSV path to results if any
+    if trades_csv_path:
+        results['trades_csv_path'] = trades_csv_path
     
     logger.info(f"Total trades: {results['total_trades']}")
     logger.info(f"Total P&L: ₹{results['total_pnl']:,.2f}")
@@ -727,8 +744,10 @@ def _empty_backtest_results() -> Dict[str, Any]:
         'avg_holding_time': 0,
         'equity_curve': [0.0],
         'drawdown_curve': [0.0],
-        'trades_df': pd.DataFrame()
+        'trades_df': pd.DataFrame(),
+        'trades_csv_path': None
     }
+
 
 
 # =============================================================================
@@ -1260,7 +1279,8 @@ def main():
         proba=y_pred_proba,
         sequence_length=args.sequence_length,
         lot_size=args.lot_size,
-        transaction_cost=args.transaction_cost
+        transaction_cost=args.transaction_cost,
+        trades_csv_path=os.path.join(reports_dir, 'backtest_trades.csv')
     )
     
     # Plot equity curve
