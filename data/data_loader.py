@@ -394,7 +394,12 @@ def create_target_labels(df: pd.DataFrame) -> pd.DataFrame:
     # Calculate target
     # Shift(-1) gets the next row's value
     # We compare next close with current close
-    df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
+    #df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
+    df['returns'] = df['close'].pct_change()
+    df['volatility'] = df['returns'].rolling(20).std()
+    df['target'] = (
+        (df['close'].shift(-1) - df['close']) / (df['volatility'] * df['close']) > 0.5
+    ).astype(int)
     
     # The last row will have an invalid target because there is no t+1.
     # We remove the last row as the target is unknown.
