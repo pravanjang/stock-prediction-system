@@ -78,6 +78,51 @@ def load_hyperparameters(
         return None
 
 
+def load_selected_features(
+    selected_features_path: str = 'models/checkpoints/selected_features.txt'
+) -> Optional[List[str]]:
+    """
+    Load selected features from a text file.
+    
+    This function reads the list of selected features saved by the feature
+    selection process (feature_selection.py). Each line in the file should
+    contain one feature name.
+    
+    Args:
+        selected_features_path: Path to the selected features text file
+        
+    Returns:
+        List of feature names, or None if file doesn't exist
+    """
+    logger = logging.getLogger(__name__)
+    
+    if os.path.exists(selected_features_path):
+        try:
+            with open(selected_features_path, 'r') as f:
+                features = [line.strip() for line in f if line.strip()]
+            
+            if features:
+                logger.info(
+                    f"Loaded {len(features)} selected features from {selected_features_path}"
+                )
+                return features
+            else:
+                logger.warning(
+                    f"Selected features file is empty: {selected_features_path}"
+                )
+                return None
+        except IOError as e:
+            logger.warning(
+                f"Could not load selected features from {selected_features_path}: {e}"
+            )
+            return None
+    else:
+        logger.info(
+            f"No selected features file found at {selected_features_path}, using all features"
+        )
+        return None
+
+
 def get_all_features() -> List[str]:
     """Return all feature names for XGBoost training."""
     return OHLCV_FEATURES + TECHNICAL_FEATURES + TEMPORAL_FEATURES + PRICE_ACTION_FEATURES
@@ -108,6 +153,7 @@ class BGRUXGBoostEnsemble:
         sequence_length: int = 60,
         device: Optional[str] = None,
         hyperparams_path: Optional[str] = None,
+        selected_features_path: Optional[str] = None,
         hidden_dim: int = 128,
         num_layers: int = 2,
         dropout: float = 0.3
@@ -127,6 +173,8 @@ class BGRUXGBoostEnsemble:
             device: Device for BGRU model ('cuda', 'cpu', or None for auto-detect)
             hyperparams_path: Path to hyperparameters JSON file. If provided,
                 hyperparameters will be loaded from this file.
+            selected_features_path: Path to selected features text file. If provided,
+                only these features will be used for XGBoost training.
             hidden_dim: Hidden dimension for BGRU (default: 128, overridden by file)
             num_layers: Number of GRU layers (default: 2, overridden by file)
             dropout: Dropout rate (default: 0.3, overridden by file)
@@ -190,8 +238,22 @@ class BGRUXGBoostEnsemble:
         # Default ensemble weights: BGRU (60%), XGBoost (40%)
         self.weights: List[float] = [0.6, 0.4]
         
-        # Feature columns for XGBoost (determined from training data)
-        self.feature_columns: List[str] = get_all_features()
+        # Load selected features if path provided, otherwise use all features
+        self.selected_features_path = selected_features_path
+        loaded_features = None
+        if selected_features_path:
+            loaded_features = load_selected_features(selected_features_path)
+        
+        if loaded_features:
+            self.feature_columns: List[str] = loaded_features
+            self.logger.info(
+                f"Using {len(loaded_features)} selected features for XGBoost"
+            )
+        else:
+            self.feature_columns = get_all_features()
+            self.logger.info(
+                f"Using all {len(self.feature_columns)} features for XGBoost"
+            )
         
         self.logger.info(
             f"Initialized BGRUXGBoostEnsemble with sequence_length={sequence_length}"
@@ -805,6 +867,12 @@ def main():
         default=None,
         help='Path to best hyperparameters JSON file (from optimization)'
     )
+    parser.add_argument(
+        '--selected_features_path',
+        type=str,
+        default=None,
+        help='Path to selected features text file (from feature selection)'
+    )
     
     args = parser.parse_args()
     
@@ -833,10 +901,19 @@ def main():
             hyperparams_path = default_path
             logger.info(f"Using default hyperparameters file: {hyperparams_path}")
     
+    # Default selected features path if not specified
+    selected_features_path = args.selected_features_path
+    if selected_features_path is None:
+        default_path = os.path.join(args.checkpoint_dir, 'selected_features.txt')
+        if os.path.exists(default_path):
+            selected_features_path = default_path
+            logger.info(f"Using default selected features file: {selected_features_path}")
+    
     ensemble = BGRUXGBoostEnsemble(
         bgru_model_path=args.bgru_model,
         sequence_length=args.sequence_length,
-        hyperparams_path=hyperparams_path
+        hyperparams_path=hyperparams_path,
+        selected_features_path=selected_features_path
     )
     
     if args.train:
