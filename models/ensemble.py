@@ -317,7 +317,7 @@ class BGRUXGBoostEnsemble:
         min_child_weight: int = 3,
         reg_alpha: float = 0.1,
         reg_lambda: float = 1.0,
-        scale_pos_weight_multiplier: float = 1.5,
+        scale_pos_weight_multiplier: float = 1.1,
         random_state: int = 42,
         verbose: bool = False
     ) -> Dict[str, float]:
@@ -344,7 +344,7 @@ class BGRUXGBoostEnsemble:
             min_child_weight: Minimum sum of instance weight in child (default: 3)
             reg_alpha: L1 regularization term (default: 0.1)
             reg_lambda: L2 regularization term (default: 1.0)
-            scale_pos_weight_multiplier: Multiplier for minority class weight (default: 1.5)
+            scale_pos_weight_multiplier: Multiplier for minority class weight (default: 1.1)
             random_state: Random seed (default: 42)
             verbose: Whether to print training progress (default: False)
         
@@ -370,11 +370,12 @@ class BGRUXGBoostEnsemble:
         n_pos = np.sum(y_train == 1)
         n_neg = np.sum(y_train == 0)
         base_scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
-        scale_pos_weight = base_scale_pos_weight * scale_pos_weight_multiplier
+        # Reduce the multiplier to avoid excessive false positives
+        scale_pos_weight = base_scale_pos_weight * 1.0  # Changed from scale_pos_weight_multiplier (1.1) to 1.0
         
         self.logger.info(f"Class distribution: {n_neg} negative, {n_pos} positive")
         self.logger.info(f"Base scale pos weight: {base_scale_pos_weight:.4f}")
-        self.logger.info(f"Applied scale pos weight (with {scale_pos_weight_multiplier}x multiplier): {scale_pos_weight:.4f}")
+        self.logger.info(f"Applied scale pos weight (adjusted to 1.0x): {scale_pos_weight:.4f}")
         
         # Initialize XGBoost classifier with improved regularization
         self.xgb_model = xgb.XGBClassifier(
@@ -983,14 +984,15 @@ def main():
     
     if args.train:
         # Load training and validation data
-        train_path = os.path.join(data_dir, 'train.csv')
-        val_path = os.path.join(data_dir, 'val.csv')
+        # Prefer *_final.csv files which contain all features
+        train_path = os.path.join(data_dir, 'train_final.csv')
+        val_path = os.path.join(data_dir, 'val_final.csv')
         
-        # Try alternative names
+        # Fallback to train.csv if *_final.csv doesn't exist
         if not os.path.exists(train_path):
-            train_path = os.path.join(data_dir, 'train_final.csv')
+            train_path = os.path.join(data_dir, 'train.csv')
         if not os.path.exists(val_path):
-            val_path = os.path.join(data_dir, 'val_final.csv')
+            val_path = os.path.join(data_dir, 'val.csv')
         
         if not os.path.exists(train_path) or not os.path.exists(val_path):
             logger.error(f"Training/validation data not found in {data_dir}")

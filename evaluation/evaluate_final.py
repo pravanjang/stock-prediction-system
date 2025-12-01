@@ -125,6 +125,10 @@ def find_optimal_threshold(
         elif metric == 'f1_recall_avg':
             # Custom: average of F1 and recall to favor recall
             score = (f1 + recall) / 2
+        elif metric == 'f0.5':
+            # F0.5 score: weights precision twice as much as recall
+            beta = 0.5
+            score = (1 + beta**2) * (precision * recall) / ((beta**2 * precision) + recall) if ((beta**2 * precision) + recall) > 0 else 0
         else:
             score = f1
         
@@ -1443,6 +1447,12 @@ def main():
         default=0.0003,
         help='Transaction cost per trade (default: 0.03%%)'
     )
+    parser.add_argument(
+        '--threshold',
+        type=float,
+        default=None,
+        help='Manual decision threshold (overrides optimization)'
+    )
     
     args = parser.parse_args()
     
@@ -1489,6 +1499,12 @@ def main():
         y_true, y_pred_proba, metric='f1_recall_avg'
     )
     logger.info(f"Optimal threshold (F1+Recall): {optimal_threshold_recall:.3f}")
+
+    # Find optimal threshold prioritizing precision (F0.5)
+    optimal_threshold_precision, best_precision_score, metrics_precision = find_optimal_threshold(
+        y_true, y_pred_proba, metric='f0.5'
+    )
+    logger.info(f"Optimal threshold (F0.5 - Precision Focused): {optimal_threshold_precision:.3f}")
     
     # Find threshold for target recall
     target_threshold, target_metrics = find_threshold_for_target_recall(
@@ -1499,9 +1515,13 @@ def main():
     logger.info(f"  -> Recall: {target_metrics.get('recall', 0):.4f}")
     logger.info(f"  -> F1: {target_metrics.get('f1', 0):.4f}")
     
-    # Use the threshold that optimizes F1 + Recall balance
-    # You can change this to optimal_threshold_f1 or target_threshold based on needs
-    optimal_threshold = optimal_threshold_recall
+    # Determine final threshold
+    if args.threshold is not None:
+        optimal_threshold = args.threshold
+        logger.info(f"Using manual threshold: {optimal_threshold:.3f}")
+    else:
+        # Use the threshold that optimizes F0.5 (Precision-focused) to avoid "always buy" bias
+        optimal_threshold = optimal_threshold_precision
     
     # Apply optimal threshold to get improved predictions
     y_pred_optimized = (y_pred_proba >= optimal_threshold).astype(int)

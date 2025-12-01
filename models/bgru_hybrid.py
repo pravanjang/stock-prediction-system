@@ -162,7 +162,22 @@ class FocalLoss(nn.Module):
 
 
 def get_static_features() -> List[str]:
-    """Return all static feature names (technical + temporal + price action)."""
+    """
+    Return static feature names.
+    If features/selected_features.txt exists, return those features.
+    Otherwise, return all static features (technical + temporal + price action).
+    """
+    selected_features_path = os.path.join('features', 'selected_features.txt')
+    if os.path.exists(selected_features_path):
+        try:
+            with open(selected_features_path, 'r') as f:
+                features = [line.strip() for line in f if line.strip()]
+            if features:
+                # print(f"Loaded {len(features)} selected features from {selected_features_path}")
+                return features
+        except Exception as e:
+            print(f"Error loading selected features: {e}")
+            
     return TECHNICAL_FEATURES + TEMPORAL_FEATURES + PRICE_ACTION_FEATURES
 
 
@@ -591,12 +606,12 @@ class HybridBGRUModel:
         batch_size: int = 64,
         checkpoint_dir: str = 'models/checkpoints/',
         log_dir: str = 'models/logs/',
-        use_focal_loss: bool = True,
+        use_focal_loss: bool = False,
         focal_alpha: float = 0.7,
         focal_gamma: float = 2.0,
         use_smote: bool = True,
         smote_ratio: float = 0.7,
-        class_weight_multiplier: float = 1.5
+        class_weight_multiplier: float = 1.1
     ) -> Dict[str, List[float]]:
         """
         Train the Hybrid BGRU model with two-phase approach.
@@ -616,7 +631,7 @@ class HybridBGRUModel:
             focal_gamma: Gamma parameter for Focal Loss (default: 2.0)
             use_smote: Use SMOTE for minority class oversampling (default: True)
             smote_ratio: Target ratio for SMOTE (default: 0.7)
-            class_weight_multiplier: Multiplier for class weights (default: 1.5)
+            class_weight_multiplier: Multiplier for class weights (default: 1.1)
         
         Returns:
             Dictionary containing training history
@@ -743,24 +758,31 @@ class HybridBGRUModel:
             criterion = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
         else:
             # Use weighted BCE with aggressive class weights
-            neg_weight = torch.clamp(class_weights[0], min=MIN_STD)
-            # Apply multiplier for more aggressive weighting
-            pos_weight = (class_weights[1] / neg_weight) * class_weight_multiplier
+            # Calculate pos_weight: ratio of negative to positive samples
+            n_neg = (y_train == 0).sum()
+            n_pos = (y_train == 1).sum()
+            
+            # pos_weight makes the loss treat minority class as if it had more samples
+            pos_weight = (n_neg / n_pos) * class_weight_multiplier
             
             self.logger.info(
                 f"Using Weighted BCE with pos_weight={pos_weight:.4f} "
-                f"(multiplier={class_weight_multiplier})"
+                f"(neg={n_neg}, pos={n_pos}, multiplier={class_weight_multiplier})"
             )
             
+            # Use BCEWithLogitsLoss for numerical stability
+            # Note: This requires raw logits, but our model outputs sigmoid
+            # So we use BCELoss with manual weighting
             def weighted_bce_loss(
                 outputs: torch.Tensor,
                 targets: torch.Tensor
             ) -> torch.Tensor:
-                weights = torch.ones_like(targets)
-                weights[targets == 1] = pos_weight
-                bce = nn.functional.binary_cross_entropy(
-                    outputs, targets, reduction='none'
-                )
+                # Clamp to avoid log(0)
+                outputs = torch.clamp(outputs, min=1e-7, max=1 - 1e-7)
+                # Binary cross entropy with per-sample weighting
+                bce = -(targets * torch.log(outputs) + (1 - targets) * torch.log(1 - outputs))
+                # Apply higher weight to positive class
+                weights = torch.where(targets == 1, pos_weight, 1.0)
                 return (bce * weights).mean()
             
             criterion = weighted_bce_loss
@@ -776,7 +798,7 @@ class HybridBGRUModel:
         # Early stopping
         best_val_loss = float('inf')
         best_val_acc = 0.0
-        patience = 10
+        patience = 30
         patience_counter = 0
         
         # Two-phase training
@@ -1238,14 +1260,15 @@ def main():
     
     if args.train:
         # Load training and validation data
-        train_path = os.path.join(args.data_dir, 'train.csv')
-        val_path = os.path.join(args.data_dir, 'val.csv')
+        # Prefer *_final.csv files which contain all features
+        train_path = os.path.join(args.data_dir, 'train_final.csv')
+        val_path = os.path.join(args.data_dir, 'val_final.csv')
         
-        # Also try train_final.csv if train.csv doesn't exist
+        # Fallback to train.csv if *_final.csv doesn't exist
         if not os.path.exists(train_path):
-            train_path = os.path.join(args.data_dir, 'train_final.csv')
+            train_path = os.path.join(args.data_dir, 'train.csv')
         if not os.path.exists(val_path):
-            val_path = os.path.join(args.data_dir, 'val_final.csv')
+            val_path = os.path.join(args.data_dir, 'val.csv')
         
         if not os.path.exists(train_path) or not os.path.exists(val_path):
             logger.error(f"Training data not found in {args.data_dir}")

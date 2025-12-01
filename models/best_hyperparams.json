@@ -1,9 +1,9 @@
 {
   "hidden_dim": 128,
-  "num_layers": 1,
-  "dropout": 0.3,
+  "num_layers": 3,
+  "dropout": 0.5,
   "learning_rate": 0.001,
   "batch_size": 32,
   "best_value": 0.6859903381642513,
-  "optimization_time": "2025-11-30T18:43:15.211874"
+  "optimization_time": "2025-11-30T21:06:29.872165"
 }
