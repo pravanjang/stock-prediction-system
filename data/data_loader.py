@@ -379,33 +379,43 @@ def clean_data(
     return df
 
 
-def create_target_labels(df: pd.DataFrame) -> pd.DataFrame:
+def create_target_labels(df: pd.DataFrame, target_type: str = 'regression') -> pd.DataFrame:
     """
-    Creates binary directional labels:
-    - Label = 1 if close(t+1) > close(t) [UP]
-    - Label = 0 if close(t+1) <= close(t) [DOWN]
+    Creates target labels for prediction.
     
-    Handles edge cases (equal prices, gaps at market open)
-    Adds column 'target' to dataframe
-    Returns: df with target column
+    Args:
+        df: DataFrame with OHLCV data
+        target_type: 'regression' for price prediction, 'classification' for directional
+    
+    Returns:
+        DataFrame with target column
     """
     df = df.copy()
     
-    # Calculate target
-    # Shift(-1) gets the next row's value
-    # We compare next close with current close
-    #df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
-    df['returns'] = df['close'].pct_change()
-    df['volatility'] = df['returns'].rolling(20).std()
-    df['target'] = (
-        (df['close'].shift(-1) - df['close']) / (df['volatility'] * df['close']) > 0.5
-    ).astype(int)
+    # Small epsilon to prevent division by zero
+    EPSILON = 1e-8
     
-    # The last row will have an invalid target because there is no t+1.
-    # We remove the last row as the target is unknown.
+    if target_type == 'regression':
+        # Predict next day's close price
+        df['target'] = df['close'].shift(-1)
+        
+        # Also calculate percentage change for reference (with epsilon to prevent div by zero)
+        df['target_pct_change'] = ((df['close'].shift(-1) - df['close']) / (df['close'] + EPSILON)) * 100
+        
+        logger.info(f"Created regression targets. Target range: [{df['target'].min():.2f}, {df['target'].max():.2f}]")
+        logger.info(f"Target % change range: [{df['target_pct_change'].min():.2f}%, {df['target_pct_change'].max():.2f}%]")
+        
+    else:  # classification (keep original for backwards compatibility)
+        df['returns'] = df['close'].pct_change()
+        df['volatility'] = df['returns'].rolling(20).std()
+        df['target'] = (
+            (df['close'].shift(-1) - df['close']) / (df['volatility'] * df['close'] + EPSILON) > 0.5
+        ).astype(int)
+        logger.info(f"Created classification targets. Class distribution: {df['target'].value_counts().to_dict()}")
+    
+    # Remove last row (no target available)
     df = df.iloc[:-1]
     
-    logger.info(f"Created target labels. Class distribution: {df['target'].value_counts().to_dict()}")
     return df
 
 
@@ -634,7 +644,7 @@ def main():
             return 1
             
         # Create target labels
-        df = create_target_labels(df)
+        df = create_target_labels(df, target_type='regression')
         
         if df.empty:
             logger.error("No data remaining after creating target labels.")

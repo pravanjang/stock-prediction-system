@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hybrid BGRU Model for BankNifty Directional Prediction.
+Hybrid BGRU Model for BankNifty Price Prediction.
 
 This module implements a hybrid architecture combining:
 - Path 1: BGRU processing sequential OHLCV data
 - Path 2: Dense layers processing static features (technical indicators, temporal)
 - Fusion: Concatenate BGRU output + static features
-- Output: Dense layers for classification
+- Output: Dense layers for regression (next day close price prediction)
 """
 
 import argparse
@@ -22,17 +22,9 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.utils.class_weight import compute_class_weight
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
-
-# Optional: SMOTE for oversampling
-try:
-    from imblearn.over_sampling import SMOTE
-    SMOTE_AVAILABLE = True
-except ImportError:
-    SMOTE_AVAILABLE = False
 
 # Constants
 MIN_STD = 1e-8  # Minimum standard deviation to avoid division by zero
@@ -92,73 +84,6 @@ NO_NORMALIZE_FEATURES = [
     'is_bullish_engulf', 'is_bearish_engulf', 'is_doji', 'is_hammer',
     'is_shooting_star', 'is_inside_bar', 'tick_direction'
 ]
-
-
-class FocalLoss(nn.Module):
-    """
-    Focal Loss for handling class imbalance.
-    
-    Focal Loss reduces the relative loss for well-classified examples,
-    putting more focus on hard, misclassified examples.
-    
-    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-    
-    Args:
-        alpha: Weighting factor for the rare class (default: 0.25)
-        gamma: Focusing parameter that reduces loss for easy examples (default: 2.0)
-        reduction: 'mean', 'sum', or 'none' (default: 'mean')
-    """
-    
-    def __init__(
-        self,
-        alpha: float = 0.25,
-        gamma: float = 2.0,
-        reduction: str = 'mean'
-    ):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-    
-    def forward(
-        self,
-        inputs: torch.Tensor,
-        targets: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Forward pass for focal loss calculation.
-        
-        Args:
-            inputs: Predicted probabilities (sigmoid output), shape [batch, 1]
-            targets: Ground truth labels (0 or 1), shape [batch, 1]
-        
-        Returns:
-            Focal loss value
-        """
-        # Clamp inputs to avoid log(0)
-        inputs = torch.clamp(inputs, min=1e-7, max=1 - 1e-7)
-        
-        # Binary cross entropy
-        bce_loss = nn.functional.binary_cross_entropy(
-            inputs, targets, reduction='none'
-        )
-        
-        # Calculate p_t
-        p_t = inputs * targets + (1 - inputs) * (1 - targets)
-        
-        # Calculate alpha_t (higher weight for minority class)
-        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-        
-        # Apply focal modulation
-        focal_weight = alpha_t * (1 - p_t) ** self.gamma
-        focal_loss = focal_weight * bce_loss
-        
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
 
 
 def get_static_features() -> List[str]:
@@ -287,7 +212,7 @@ class HybridBGRUNetwork(nn.Module):
         
         # Output layer
         self.output_fc = nn.Linear(32, 1)
-        self.sigmoid = nn.Sigmoid()
+        # Removed sigmoid - no activation for regression
     
     def forward(
         self,
@@ -302,7 +227,7 @@ class HybridBGRUNetwork(nn.Module):
             static_input: Static features [batch, n_static_features]
         
         Returns:
-            Output tensor of shape [batch, 1] with sigmoid activation
+            Output tensor of shape [batch, 1] for regression
         """
         # Sequential Path - pass through all GRU layers
         out_seq = seq_input
@@ -334,9 +259,7 @@ class HybridBGRUNetwork(nn.Module):
         
         # Output
         out = self.output_fc(out)
-        out = self.sigmoid(out)
-        
-        return out
+        return out  # No sigmoid activation for regression
 
 
 class HybridBGRUModel:
@@ -484,13 +407,15 @@ class HybridBGRUModel:
     
     def prepare_data(
         self,
-        df: pd.DataFrame
+        df: pd.DataFrame,
+        fit_scaler: bool = True
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Prepares two types of inputs for the hybrid model.
         
         Args:
             df: DataFrame with OHLCV, technical, temporal, price action features
+            fit_scaler: Whether to fit target normalization scaler (True for training)
         
         Returns:
             Tuple of (seq_data, static_data, targets)
@@ -524,6 +449,16 @@ class HybridBGRUModel:
         # Extract targets
         if 'target' in df.columns:
             targets = df['target'].values.astype(np.float32)
+            
+            # Normalize targets for better training stability
+            if fit_scaler:
+                self.target_mean = float(targets.mean())
+                self.target_std = float(targets.std())
+                self.logger.info(f"Target normalization - Mean: {self.target_mean:.2f}, Std: {self.target_std:.2f}")
+            
+            # Apply normalization if scaler exists
+            if hasattr(self, 'target_mean') and hasattr(self, 'target_std'):
+                targets = (targets - self.target_mean) / (self.target_std + MIN_STD)
         else:
             targets = None
         
@@ -565,24 +500,6 @@ class HybridBGRUModel:
         self.logger.info(f"{split} class distribution: {distribution}")
         return distribution
     
-    def _compute_class_weights(self, targets: np.ndarray) -> torch.Tensor:
-        """Compute balanced class weights given binary targets."""
-        if targets.size == 0:
-            raise ValueError("Cannot compute class weights with empty target array.")
-        labels = targets.astype(int)
-        unique_classes = np.unique(labels)
-        if len(unique_classes) < 2:
-            self.logger.warning(
-                "Only one class present. Using equal class weights."
-            )
-            return torch.ones(2, dtype=torch.float32, device=self.device)
-        weights = compute_class_weight(
-            class_weight='balanced',
-            classes=np.array([0, 1]),
-            y=labels
-        )
-        return torch.tensor(weights, dtype=torch.float32, device=self.device)
-    
     def train(
         self,
         train_df: pd.DataFrame,
@@ -590,16 +507,10 @@ class HybridBGRUModel:
         epochs: int = 50,
         batch_size: int = 64,
         checkpoint_dir: str = 'models/checkpoints/',
-        log_dir: str = 'models/logs/',
-        use_focal_loss: bool = True,
-        focal_alpha: float = 0.7,
-        focal_gamma: float = 2.0,
-        use_smote: bool = True,
-        smote_ratio: float = 0.7,
-        class_weight_multiplier: float = 1.5
+        log_dir: str = 'models/logs/'
     ) -> Dict[str, List[float]]:
         """
-        Train the Hybrid BGRU model with two-phase approach.
+        Train the Hybrid BGRU model with two-phase approach for regression.
         
         Phase 1 (20 epochs): Train entire model with lr=0.001
         Phase 2 (30 epochs): Fine-tune with lr=0.0001
@@ -611,12 +522,6 @@ class HybridBGRUModel:
             batch_size: Batch size (default: 64)
             checkpoint_dir: Directory to save model checkpoints
             log_dir: Directory to save training logs
-            use_focal_loss: Use Focal Loss instead of BCE (default: True)
-            focal_alpha: Alpha parameter for Focal Loss (default: 0.7)
-            focal_gamma: Gamma parameter for Focal Loss (default: 2.0)
-            use_smote: Use SMOTE for minority class oversampling (default: True)
-            smote_ratio: Target ratio for SMOTE (default: 0.7)
-            class_weight_multiplier: Multiplier for class weights (default: 1.5)
         
         Returns:
             Dictionary containing training history
@@ -640,9 +545,9 @@ class HybridBGRUModel:
         
         # Prepare data
         self.logger.info("Preparing training data...")
-        X_seq_train, X_static_train, y_train = self.prepare_data(train_df)
+        X_seq_train, X_static_train, y_train = self.prepare_data(train_df, fit_scaler=True)
         self.logger.info("Preparing validation data...")
-        X_seq_val, X_static_val, y_val = self.prepare_data(val_df)
+        X_seq_val, X_static_val, y_val = self.prepare_data(val_df, fit_scaler=False)
         
         if len(X_seq_train) == 0 or len(X_seq_val) == 0:
             raise ValueError("Insufficient data for training.")
@@ -661,57 +566,6 @@ class HybridBGRUModel:
             self.build_model()
         if self.model is None:
             raise RuntimeError("Model initialization failed.")
-        
-        # Log class distribution and compute weights
-        self._log_class_distribution(y_train, split='Train')
-        class_weights = self._compute_class_weights(y_train)
-        
-        # Apply SMOTE for minority class oversampling if enabled
-        if use_smote and SMOTE_AVAILABLE:
-            self.logger.info(f"Applying SMOTE with target ratio {smote_ratio}...")
-            try:
-                # Combine static features for SMOTE
-                # We can't directly SMOTE sequences, so we duplicate corresponding sequences
-                smote = SMOTE(sampling_strategy=smote_ratio, random_state=42)
-                X_static_resampled, y_resampled = smote.fit_resample(X_static_train, y_train)
-                
-                # For sequences, we need to duplicate corresponding indices
-                # Get the new indices based on resampling
-                n_original = len(y_train)
-                n_new = len(y_resampled)
-                
-                if n_new > n_original:
-                    # Calculate how many synthetic samples were added
-                    n_synthetic = n_new - n_original
-                    
-                    # Get indices of minority class samples
-                    minority_indices = np.where(y_train == 1)[0]
-                    
-                    # Randomly sample with replacement to duplicate sequences
-                    np.random.seed(42)
-                    duplicate_indices = np.random.choice(
-                        minority_indices, size=n_synthetic, replace=True
-                    )
-                    
-                    # Concatenate original and duplicated sequences
-                    X_seq_train = np.concatenate(
-                        [X_seq_train, X_seq_train[duplicate_indices]], axis=0
-                    )
-                    X_static_train = X_static_resampled
-                    y_train = y_resampled
-                    
-                    self.logger.info(
-                        f"SMOTE applied: {n_original} -> {n_new} samples "
-                        f"(added {n_synthetic} synthetic minority samples)"
-                    )
-                    self._log_class_distribution(y_train, split='After SMOTE')
-            except Exception as e:
-                self.logger.warning(f"SMOTE failed: {e}. Continuing without oversampling.")
-        elif use_smote and not SMOTE_AVAILABLE:
-            self.logger.warning(
-                "SMOTE requested but imblearn not installed. "
-                "Install with: pip install imbalanced-learn"
-            )
         
         # Convert to tensors
         X_seq_train_t = torch.FloatTensor(X_seq_train).to(self.device)
@@ -733,49 +587,20 @@ class HybridBGRUModel:
             val_dataset, batch_size=batch_size, shuffle=False
         )
         
-        # Loss function selection
-        if use_focal_loss:
-            # Use Focal Loss for better handling of class imbalance
-            # Higher alpha gives more weight to positive (minority) class
-            self.logger.info(
-                f"Using Focal Loss with alpha={focal_alpha}, gamma={focal_gamma}"
-            )
-            criterion = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
-        else:
-            # Use weighted BCE with aggressive class weights
-            neg_weight = torch.clamp(class_weights[0], min=MIN_STD)
-            # Apply multiplier for more aggressive weighting
-            pos_weight = (class_weights[1] / neg_weight) * class_weight_multiplier
-            
-            self.logger.info(
-                f"Using Weighted BCE with pos_weight={pos_weight:.4f} "
-                f"(multiplier={class_weight_multiplier})"
-            )
-            
-            def weighted_bce_loss(
-                outputs: torch.Tensor,
-                targets: torch.Tensor
-            ) -> torch.Tensor:
-                weights = torch.ones_like(targets)
-                weights[targets == 1] = pos_weight
-                bce = nn.functional.binary_cross_entropy(
-                    outputs, targets, reduction='none'
-                )
-                return (bce * weights).mean()
-            
-            criterion = weighted_bce_loss
+        # Use Mean Squared Error Loss for regression
+        self.logger.info("Using MSE Loss for regression")
+        criterion = nn.MSELoss()
         
         # Training history
         self.training_history = {
             'train_loss': [],
-            'train_acc': [],
+            'train_mae': [],
             'val_loss': [],
-            'val_acc': []
+            'val_mae': []
         }
         
         # Early stopping
         best_val_loss = float('inf')
-        best_val_acc = 0.0
         patience = 10
         patience_counter = 0
         
@@ -817,7 +642,7 @@ class HybridBGRUModel:
             # Training phase
             self.model.train()
             train_loss = 0.0
-            train_correct = 0
+            train_mae = 0.0
             train_total = 0
             
             train_pbar = tqdm(
@@ -839,22 +664,22 @@ class HybridBGRUModel:
                 optimizer.step()
                 
                 train_loss += loss.item() * batch_seq.size(0)
-                predictions = (outputs >= 0.5).float()
-                train_correct += (predictions == batch_y).sum().item()
+                mae = torch.abs(outputs - batch_y).mean()
+                train_mae += mae.item() * batch_seq.size(0)
                 train_total += batch_y.size(0)
                 
                 train_pbar.set_postfix({
                     'loss': f'{loss.item():.4f}',
-                    'acc': f'{train_correct / train_total:.4f}'
+                    'mae': f'{mae.item():.4f}'
                 })
             
             train_loss /= train_total
-            train_acc = train_correct / train_total
+            train_mae /= train_total
             
             # Validation phase
             self.model.eval()
             val_loss = 0.0
-            val_correct = 0
+            val_mae = 0.0
             val_total = 0
             
             with torch.no_grad():
@@ -868,51 +693,47 @@ class HybridBGRUModel:
                     loss = criterion(outputs, batch_y)
                     
                     val_loss += loss.item() * batch_seq.size(0)
-                    predictions = (outputs >= 0.5).float()
-                    val_correct += (predictions == batch_y).sum().item()
+                    mae = torch.abs(outputs - batch_y).mean()
+                    val_mae += mae.item() * batch_seq.size(0)
                     val_total += batch_y.size(0)
                     
                     val_pbar.set_postfix({
                         'loss': f'{loss.item():.4f}',
-                        'acc': f'{val_correct / val_total:.4f}'
+                        'mae': f'{mae.item():.4f}'
                     })
             
             val_loss /= val_total
-            val_acc = val_correct / val_total
+            val_mae /= val_total
             
             # Update scheduler
             scheduler.step(val_loss)
             
             # Record history
             self.training_history['train_loss'].append(train_loss)
-            self.training_history['train_acc'].append(train_acc)
+            self.training_history['train_mae'].append(train_mae)
             self.training_history['val_loss'].append(val_loss)
-            self.training_history['val_acc'].append(val_acc)
+            self.training_history['val_mae'].append(val_mae)
             
             # Log epoch results
             current_lr = optimizer.param_groups[0]['lr']
             self.logger.info(
                 f"Epoch {epoch + 1}/{epochs} - "
-                f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, "
+                f"Train Loss: {train_loss:.4f}, Train MAE: {train_mae:.4f}, "
+                f"Val Loss: {val_loss:.4f}, Val MAE: {val_mae:.4f}, "
                 f"LR: {current_lr:.6f}"
             )
             
             # Early stopping
-            improved = (
-                val_acc > best_val_acc or
-                (val_acc == best_val_acc and val_loss < best_val_loss)
-            )
+            improved = val_loss < best_val_loss
             if improved:
-                best_val_acc = val_acc
                 best_val_loss = val_loss
                 patience_counter = 0
                 
                 checkpoint_path = os.path.join(checkpoint_dir, 'bgru_hybrid.pt')
                 self.save_model(checkpoint_path)
                 self.logger.info(
-                    f"Saved best model with Val Acc: {val_acc:.4f}, "
-                    f"Val Loss: {val_loss:.4f}"
+                    f"Saved best model with Val Loss: {val_loss:.4f}, "
+                    f"Val MAE: {val_mae:.4f}"
                 )
             else:
                 patience_counter += 1
@@ -934,7 +755,7 @@ class HybridBGRUModel:
         self._plot_training_curves(checkpoint_dir)
         
         self.logger.info("=" * 60)
-        self.logger.info(f"Training complete. Best Val Acc: {best_val_acc:.4f}")
+        self.logger.info(f"Training complete. Best Val Loss: {best_val_loss:.4f}")
         self.logger.info("=" * 60)
         
         # Cleanup
@@ -964,18 +785,18 @@ class HybridBGRUModel:
         axes[0].legend()
         axes[0].grid(True)
         
-        # Accuracy plot
+        # MAE plot
         axes[1].plot(
-            epochs_range, self.training_history['train_acc'],
-            'b-', label='Train Acc'
+            epochs_range, self.training_history['train_mae'],
+            'b-', label='Train MAE'
         )
         axes[1].plot(
-            epochs_range, self.training_history['val_acc'],
-            'r-', label='Val Acc'
+            epochs_range, self.training_history['val_mae'],
+            'r-', label='Val MAE'
         )
-        axes[1].set_title('Training and Validation Accuracy')
+        axes[1].set_title('Training and Validation MAE')
         axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy')
+        axes[1].set_ylabel('MAE')
         axes[1].legend()
         axes[1].grid(True)
         
@@ -990,28 +811,36 @@ class HybridBGRUModel:
     def predict(
         self,
         test_df: pd.DataFrame,
-        batch_size: int = 64
+        batch_size: int = 64,
+        denormalize: bool = True
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate predictions on test data.
+        Generate price predictions on test data.
         
         Args:
             test_df: Test DataFrame
             batch_size: Batch size for inference
+            denormalize: Whether to denormalize predictions back to original scale
         
         Returns:
-            predictions: Binary predictions (0 or 1)
-            probabilities: Probability scores
+            predictions: Predicted next day close prices
+            current_prices: Current day close prices for reference
         """
         if self.model is None:
             raise ValueError("Model not built or loaded.")
         
-        # Prepare data
-        X_seq, X_static, _ = self.prepare_data(test_df)
+        # Prepare data (don't fit new scaler)
+        X_seq, X_static, _ = self.prepare_data(test_df, fit_scaler=False)
         
         if len(X_seq) == 0:
             self.logger.warning("No sequences generated from test data")
             return np.array([]), np.array([])
+        
+        # Get current prices for reference
+        # After sequence creation, each prediction corresponds to the last element of each sequence
+        start_idx = self.sequence_length - 1
+        end_idx = start_idx + len(X_seq)
+        current_prices = test_df['close'].iloc[start_idx:end_idx].values
         
         # Convert to tensors
         X_seq_t = torch.FloatTensor(X_seq).to(self.device)
@@ -1023,19 +852,25 @@ class HybridBGRUModel:
         
         # Inference
         self.model.eval()
-        all_probs = []
+        all_preds = []
         
         with torch.no_grad():
             for batch_seq, batch_static in tqdm(test_loader, desc="Predicting"):
                 outputs = self.model(batch_seq, batch_static)
-                all_probs.extend(outputs.cpu().numpy())
+                all_preds.extend(outputs.cpu().numpy())
         
-        probabilities = np.array(all_probs).flatten()
-        predictions = (probabilities >= 0.5).astype(int)
+        predictions = np.array(all_preds).flatten()
+        
+        # Denormalize predictions if requested
+        if denormalize and hasattr(self, 'target_mean') and hasattr(self, 'target_std'):
+            predictions = predictions * self.target_std + self.target_mean
+            self.logger.info("Predictions denormalized to original price scale")
         
         self.logger.info(f"Generated {len(predictions)} predictions")
+        self.logger.info(f"Predicted price range: [{predictions.min():.2f}, {predictions.max():.2f}]")
+        self.logger.info(f"Current price range: [{current_prices.min():.2f}, {current_prices.max():.2f}]")
         
-        return predictions, probabilities
+        return predictions, current_prices
     
     def save_model(self, path: str = 'models/checkpoints/bgru_hybrid.pt') -> None:
         """
@@ -1062,6 +897,12 @@ class HybridBGRUModel:
             'training_history': self.training_history,
             'saved_at': datetime.now().isoformat()
         }
+        
+        # Save target normalization parameters for regression
+        if hasattr(self, 'target_mean'):
+            checkpoint['target_mean'] = self.target_mean
+        if hasattr(self, 'target_std'):
+            checkpoint['target_std'] = self.target_std
         
         torch.save(checkpoint, path)
         self.logger.info(f"Model saved to {path}")
@@ -1095,6 +936,12 @@ class HybridBGRUModel:
         self.hidden_dim = int(checkpoint.get('hidden_dim', 128))
         self.num_layers = int(checkpoint.get('num_layers', 2))
         self.dropout = float(checkpoint.get('dropout', 0.3))
+        
+        # Load target normalization parameters for regression
+        if 'target_mean' in checkpoint:
+            self.target_mean = checkpoint['target_mean']
+        if 'target_std' in checkpoint:
+            self.target_std = checkpoint['target_std']
         
         # Load column configurations first (needed to determine n_static_features)
         # Load column configurations first
@@ -1290,33 +1137,62 @@ def main():
             test_path = os.path.join(args.data_dir, 'test_final.csv')
         
         if not os.path.exists(test_path):
-            logger.error(f"Test data not found")
+            logger.error("Test data not found")
             return 1
         
         logger.info(f"Loading test data from {test_path}")
         test_df = pd.read_csv(test_path, index_col=0, parse_dates=True)
         
         # Generate predictions
-        predictions, probabilities = model.predict(
+        predictions, current_prices = model.predict(
             test_df=test_df,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            denormalize=True
         )
         
-        # Save predictions
+        # Get actual values if available
+        actual_values = None
+        if 'target' in test_df.columns:
+            actual_values = test_df['target'].iloc[model.sequence_length-1:model.sequence_length-1+len(predictions)].values
+        
+        # Calculate metrics if we have actual values
+        if actual_values is not None and len(actual_values) == len(predictions):
+            from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+            
+            mae = mean_absolute_error(actual_values, predictions)
+            rmse = np.sqrt(mean_squared_error(actual_values, predictions))
+            r2 = r2_score(actual_values, predictions)
+            # Use epsilon to prevent division by zero in MAPE calculation
+            mape = np.mean(np.abs((actual_values - predictions) / (actual_values + MIN_STD))) * 100
+            
+            # Directional accuracy
+            actual_direction = (actual_values > current_prices).astype(int)
+            pred_direction = (predictions > current_prices).astype(int)
+            directional_acc = (actual_direction == pred_direction).mean()
+            
+            logger.info(f"\n{'='*50}")
+            logger.info("Test Metrics:")
+            logger.info(f"MAE: {mae:.4f}")
+            logger.info(f"RMSE: {rmse:.4f}")
+            logger.info(f"R²: {r2:.4f}")
+            logger.info(f"MAPE: {mape:.2f}%")
+            logger.info(f"Directional Accuracy: {directional_acc:.4f}")
+            logger.info(f"{'='*50}\n")
+        
+        # Save predictions with details
         output_path = os.path.join(args.checkpoint_dir, 'hybrid_predictions.csv')
         results_df = pd.DataFrame({
-            'prediction': predictions,
-            'probability': probabilities
+            'current_price': current_prices,
+            'predicted_price': predictions
         })
+        
+        if actual_values is not None:
+            results_df['actual_price'] = actual_values
+            results_df['prediction_error'] = predictions - actual_values
+            results_df['percent_error'] = ((predictions - actual_values) / actual_values) * 100
+        
         results_df.to_csv(output_path, index=False)
         logger.info(f"Predictions saved to {output_path}")
-        
-        # Calculate accuracy if targets are available
-        if 'target' in test_df.columns:
-            _, _, y_test = model.prepare_data(test_df)
-            if len(y_test) == len(predictions):
-                accuracy = (predictions == y_test).mean()
-                logger.info(f"Test Accuracy: {accuracy:.4f}")
     
     if not args.train and not args.predict:
         parser.print_help()
