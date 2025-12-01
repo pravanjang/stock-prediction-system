@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Bidirectional GRU Model for BankNifty Directional Prediction.
+Bidirectional GRU Model for BankNifty Directional Prediction and Regression.
 
-This module implements a BGRU-based neural network for predicting
-the directional movement of BankNifty index using OHLCV sequences
-and additional technical, temporal, and price action features.
+This module implements a BGRU-based neural network that supports both
+classification (directional: up/down) and regression (predict next-day close price).
+The behavior is controlled via the `regression` flag - when enabled the model
+outputs a continuous value for the next day's close; otherwise it outputs a
+probability representing the up/down direction.
 """
 
 import argparse
@@ -15,7 +17,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
 import numpy as np
 import pandas as pd
 import torch
@@ -128,7 +133,8 @@ class BGRUModel(nn.Module):
         hidden_dim: int = 128,
         num_layers: int = 2,
         dropout: float = 0.3,
-        use_attention: bool = True
+        use_attention: bool = True,
+        regression: bool = False
     ):
         """
         Initialize the BGRU model.
@@ -150,6 +156,8 @@ class BGRUModel(nn.Module):
         # For daily data, can use deeper network with self attention
         # for intraday, simpler model without attention
         self.use_attention = use_attention
+        # Regression mode toggles final activation
+        self.regression = regression
         
         # First BGRU layer (no internal dropout - applied via separate Dropout layer)
         self.gru1 = nn.GRU(
@@ -228,7 +236,9 @@ class BGRUModel(nn.Module):
         
         # Output layer
         out = self.fc3(out)
-        out = self.sigmoid(out)
+        # For regression tasks, return raw continuous value. For classification, apply sigmoid.
+        if not getattr(self, 'regression', False):
+            out = self.sigmoid(out)
         
         return out
 
@@ -251,6 +261,8 @@ class BGRUPredictor:
         device: Optional[str] = None,
         feature_columns: Optional[List[str]] = None,
         feature_groups: Optional[List[str]] = None
+        ,
+        regression: bool = False
     ):
         """
         Initialize the BGRU predictor.
@@ -297,6 +309,8 @@ class BGRUPredictor:
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
+        # Use regression mode if True (predict continuous next close value)
+        self.regression = regression
         
         # Set device
         if device is None:
@@ -308,10 +322,14 @@ class BGRUPredictor:
         self.model = None
         self.training_history: Dict[str, List[float]] = {
             'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': []
+            'val_loss': []
         }
+        if not self.regression:
+            self.training_history['train_acc'] = []
+            self.training_history['val_acc'] = []
+        else:
+            self.training_history['train_rmse'] = []
+            self.training_history['val_rmse'] = []
         
         # Normalization parameters
         self.norm_params: Optional[Dict] = None
@@ -354,6 +372,8 @@ class BGRUPredictor:
             num_layers=self.num_layers,
             dropout=self.dropout
         ).to(self.device)
+        # Ensure model inherits regression flag
+        self.model.regression = self.regression
         
         self.logger.info(f"Model built and moved to {self.device}")
         self.logger.info(f"Model architecture:\n{self.model}")
@@ -507,15 +527,28 @@ class BGRUPredictor:
             features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Extract targets (if available)
-        if 'target' in df.columns:
-            targets = df['target'].values.astype(np.float32, copy=False)
+        target_col = None
+        if self.regression:
+            # Use explicit 'next_close' for regression if available, otherwise accept 'target' (float)
+            if 'next_close' in df.columns:
+                target_col = 'next_close'
+            elif 'target' in df.columns:
+                target_col = 'target'
+            else:
+                target_col = None
+        else:
+            target_col = 'target' if 'target' in df.columns else None
+
+        if target_col is not None:
+            targets = df[target_col].values.astype(np.float32, copy=False)
             if np.isnan(targets).any():
-                raise ValueError("Target column contains NaN values. Please regenerate the dataset.")
-            if np.logical_or(targets < 0, targets > 1).any():
-                unique_vals = np.unique(targets)
-                raise ValueError(
-                    f"Target column must be binary in [0, 1]. Found values: {unique_vals}"
-                )
+                raise ValueError(f"Target column '{target_col}' contains NaN values. Please regenerate the dataset.")
+            if not self.regression:
+                if np.logical_or(targets < 0, targets > 1).any():
+                    unique_vals = np.unique(targets)
+                    raise ValueError(
+                        f"Target column must be binary in [0, 1]. Found values: {unique_vals}"
+                    )
         else:
             targets = None
         
@@ -583,6 +616,7 @@ class BGRUPredictor:
         lr: float = 0.001,
         sequence_length: int = 60,
         class_weights: Optional[torch.Tensor] = None,
+        regression: Optional[bool] = None,
         checkpoint_dir: str = 'models/checkpoints/',
         log_dir: str = 'models/logs/'
     ) -> Dict[str, List[float]]:
@@ -633,6 +667,12 @@ class BGRUPredictor:
         if self.model is None:
             raise RuntimeError("Model initialization failed during training.")
         model = self.model
+        # Update regression mode by method parameter if explicitly set
+        if regression is not None:
+            self.regression = bool(regression)
+        # Ensure model inherits regression flag
+        if hasattr(model, 'regression'):
+            model.regression = self.regression
         
         # Prepare data
         self.logger.info("Preparing training sequences...")
@@ -643,23 +683,25 @@ class BGRUPredictor:
         if len(X_train) == 0 or len(X_val) == 0:
             raise ValueError("Insufficient data for training. Need more samples than sequence_length.")
         
-        # Log class distribution and determine weights
-        self._log_class_distribution(y_train, split='Train')
-        if class_weights is not None:
-            if isinstance(class_weights, torch.Tensor):
-                class_weights_tensor = class_weights.to(self.device, dtype=torch.float32)
-            else:
-                class_weights_tensor = torch.tensor(
-                    class_weights,
-                    dtype=torch.float32,
-                    device=self.device
+        # Log class distribution and determine weights (classification only)
+        class_weights_tensor = None
+        if not self.regression:
+            self._log_class_distribution(y_train, split='Train')
+            if class_weights is not None:
+                if isinstance(class_weights, torch.Tensor):
+                    class_weights_tensor = class_weights.to(self.device, dtype=torch.float32)
+                else:
+                    class_weights_tensor = torch.tensor(
+                        class_weights,
+                        dtype=torch.float32,
+                        device=self.device
+                    )
+                self.logger.info(
+                    "Using provided class weights (neg,pos): %s",
+                    class_weights_tensor.tolist()
                 )
-            self.logger.info(
-                "Using provided class weights (neg,pos): %s",
-                class_weights_tensor.tolist()
-            )
-        else:
-            class_weights_tensor = self._compute_class_weights(y_train)
+            else:
+                class_weights_tensor = self._compute_class_weights(y_train)
         
         # Convert to tensors
         X_train_tensor = torch.FloatTensor(X_train).to(self.device)
@@ -679,23 +721,27 @@ class BGRUPredictor:
             val_dataset, batch_size=batch_size, shuffle=False
         )
         
-        # Loss function - using BCELoss since model has sigmoid output
-        # For class weights, we use pos_weight with BCELoss using reduction='none' and manual weighting
-        if class_weights_tensor is not None:
-            neg_weight = torch.clamp(class_weights_tensor[0], min=MIN_STD)
-            pos_weight = class_weights_tensor[1] / neg_weight
-            
-            def weighted_bce_loss(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-                """Weighted BCE loss for handling class imbalance."""
-                # Apply weights: higher weight for positive class
-                weights = torch.ones_like(targets)
-                weights[targets == 1] = pos_weight
-                bce = nn.functional.binary_cross_entropy(outputs, targets, reduction='none')
-                return (bce * weights).mean()
-            
-            criterion = weighted_bce_loss
+        # Loss function selection based on task type
+        if self.regression:
+            criterion = nn.MSELoss()
         else:
-            criterion = nn.BCELoss()
+            # For classification - use BCELoss
+            # For class weights, we use pos_weight with BCELoss using reduction='none' and manual weighting
+            if class_weights_tensor is not None:
+                neg_weight = torch.clamp(class_weights_tensor[0], min=MIN_STD)
+                pos_weight = class_weights_tensor[1] / neg_weight
+
+                def weighted_bce_loss(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+                    """Weighted BCE loss for handling class imbalance."""
+                    # Apply weights: higher weight for positive class
+                    weights = torch.ones_like(targets)
+                    weights[targets == 1] = pos_weight
+                    bce = nn.functional.binary_cross_entropy(outputs, targets, reduction='none')
+                    return (bce * weights).mean()
+
+                criterion = weighted_bce_loss
+            else:
+                criterion = nn.BCELoss()
         
         # Optimizer
         optimizer = torch.optim.Adam(
@@ -718,13 +764,17 @@ class BGRUPredictor:
         patience = 20
         patience_counter = 0
         
-        # Training history
+        # Training history depends on task type
         self.training_history = {
             'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': []
+            'val_loss': []
         }
+        if not self.regression:
+            self.training_history['train_acc'] = []
+            self.training_history['val_acc'] = []
+        else:
+            self.training_history['train_rmse'] = []
+            self.training_history['val_rmse'] = []
         
         self.logger.info(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
         self.logger.info(f"Epochs: {epochs}, Batch size: {batch_size}, LR: {lr}")
@@ -756,17 +806,22 @@ class BGRUPredictor:
                 optimizer.step()
                 
                 train_loss += loss.item() * batch_X.size(0)
-                predictions = (outputs >= 0.5).float()
-                train_correct += (predictions == batch_y).sum().item()
+                if not self.regression:
+                    predictions = (outputs >= 0.5).float()
+                    train_correct += (predictions == batch_y).sum().item()
                 train_total += batch_y.size(0)
                 
-                train_pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'acc': f'{train_correct / train_total:.4f}'
-                })
+                postfix = {'loss': f'{loss.item():.4f}'}
+                if not self.regression:
+                    postfix['acc'] = f'{train_correct / train_total:.4f}'
+                train_pbar.set_postfix(postfix)
             
             train_loss /= train_total
-            train_acc = train_correct / train_total
+            if not self.regression:
+                train_acc = float(train_correct) / float(train_total) if train_total > 0 else 0.0
+            else:
+                # For regression tasks, accuracy is not applicable; set to 0.0 for consistent float types
+                train_acc = 0.0
             
             # Validation phase
             model.eval()
@@ -782,50 +837,81 @@ class BGRUPredictor:
                     loss = criterion(outputs, batch_y)
                     
                     val_loss += loss.item() * batch_X.size(0)
-                    predictions = (outputs >= 0.5).float()
-                    val_correct += (predictions == batch_y).sum().item()
+                    if not self.regression:
+                        predictions = (outputs >= 0.5).float()
+                        val_correct += (predictions == batch_y).sum().item()
                     val_total += batch_y.size(0)
                     
-                    val_pbar.set_postfix({
-                        'loss': f'{loss.item():.4f}',
-                        'acc': f'{val_correct / val_total:.4f}'
-                    })
+                    postfix_val = {'loss': f'{loss.item():.4f}'}
+                    if not self.regression:
+                        postfix_val['acc'] = f'{val_correct / val_total:.4f}'
+                    val_pbar.set_postfix(postfix_val)
             
             val_loss /= val_total
-            val_acc = val_correct / val_total
+            if not self.regression:
+                val_acc = float(val_correct) / float(val_total) if val_total > 0 else 0.0
+            else:
+                # For regression tasks, accuracy is not applicable; set to 0.0 for consistent float types
+                val_acc = 0.0
             
             # Update learning rate scheduler
             scheduler.step(val_loss)
             
             # Record history
             self.training_history['train_loss'].append(train_loss)
-            self.training_history['train_acc'].append(train_acc)
             self.training_history['val_loss'].append(val_loss)
-            self.training_history['val_acc'].append(val_acc)
+            if not self.regression:
+                self.training_history['train_acc'].append(train_acc)
+                self.training_history['val_acc'].append(val_acc)
+            else:
+                self.training_history['train_rmse'].append(float(np.sqrt(train_loss)))
+                self.training_history['val_rmse'].append(float(np.sqrt(val_loss)))
             
             # Log epoch results
             current_lr = optimizer.param_groups[0]['lr']
-            self.logger.info(
-                f"Epoch {epoch + 1}/{epochs} - "
-                f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, "
-                f"LR: {current_lr:.6f}"
-            )
-            
-            # Early stopping and checkpointing based on validation accuracy (ties broken by loss)
-            improved = (val_acc > best_val_acc) or (val_acc == best_val_acc and val_loss < best_val_loss)
-            if improved:
-                best_val_acc = val_acc
-                best_val_loss = val_loss
-                patience_counter = 0
-                
-                # Save best model
-                checkpoint_path = os.path.join(checkpoint_dir, 'bgru_baseline.pt')
-                self.save_model(checkpoint_path)
-                self.logger.info(f"Saved best model with Val Acc: {val_acc:.4f}, Val Loss: {val_loss:.4f}")
+            if not self.regression:
+                self.logger.info(
+                    f"Epoch {epoch + 1}/{epochs} - "
+                    f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+                    f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, "
+                    f"LR: {current_lr:.6f}"
+                )
             else:
-                patience_counter += 1
-                self.logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+                self.logger.info(
+                    f"Epoch {epoch + 1}/{epochs} - "
+                    f"Train MSE: {train_loss:.4f}, Train RMSE: {np.sqrt(train_loss):.4f}, "
+                    f"Val MSE: {val_loss:.4f}, Val RMSE: {np.sqrt(val_loss):.4f}, "
+                    f"LR: {current_lr:.6f}"
+                )
+            
+            # Early stopping and checkpointing
+            # Early stopping and checkpointing
+            if not self.regression:
+                improved = (val_acc > best_val_acc) or (val_acc == best_val_acc and val_loss < best_val_loss)
+                if improved:
+                    best_val_acc = val_acc
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    # Save best model
+                    checkpoint_path = os.path.join(checkpoint_dir, 'bgru_baseline.pt')
+                    self.save_model(checkpoint_path)
+                    self.logger.info(f"Saved best model with Val Acc: {val_acc:.4f}, Val Loss: {val_loss:.4f}")
+                else:
+                    patience_counter += 1
+                    self.logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+            else:
+                # For regression, use lower validation MSE as improvement
+                improved = val_loss < best_val_loss
+                if improved:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    # Save best model
+                    checkpoint_path = os.path.join(checkpoint_dir, 'bgru_baseline.pt')
+                    self.save_model(checkpoint_path)
+                    self.logger.info(f"Saved best model with Val MSE: {val_loss:.4f}")
+                else:
+                    patience_counter += 1
+                    self.logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
             
             if patience_counter >= patience:
                 self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
@@ -841,7 +927,10 @@ class BGRUPredictor:
         self._plot_training_curves(checkpoint_dir)
         
         self.logger.info("=" * 60)
-        self.logger.info(f"Training complete. Best Val Acc: {best_val_acc:.4f}")
+        if not self.regression:
+            self.logger.info(f"Training complete. Best Val Acc: {best_val_acc:.4f}")
+        else:
+            self.logger.info(f"Training complete. Best Val MSE: {best_val_loss:.4f}")
         self.logger.info("=" * 60)
         
         # Remove and close file handler
@@ -857,6 +946,9 @@ class BGRUPredictor:
         Args:
             output_dir: Directory to save the plot
         """
+        if plt is None:
+            self.logger.warning("matplotlib not available: skipping training curves plotting")
+            return
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
         epochs = range(1, len(self.training_history['train_loss']) + 1)
@@ -870,12 +962,19 @@ class BGRUPredictor:
         axes[0].legend()
         axes[0].grid(True)
         
-        # Accuracy plot
-        axes[1].plot(epochs, self.training_history['train_acc'], 'b-', label='Train Acc')
-        axes[1].plot(epochs, self.training_history['val_acc'], 'r-', label='Val Acc')
-        axes[1].set_title('Training and Validation Accuracy')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy')
+        # Accuracy / Regression metric plot
+        if not self.regression:
+            axes[1].plot(epochs, self.training_history['train_acc'], 'b-', label='Train Acc')
+            axes[1].plot(epochs, self.training_history['val_acc'], 'r-', label='Val Acc')
+            axes[1].set_title('Training and Validation Accuracy')
+            axes[1].set_xlabel('Epoch')
+            axes[1].set_ylabel('Accuracy')
+        else:
+            axes[1].plot(epochs, self.training_history['train_rmse'], 'b-', label='Train RMSE')
+            axes[1].plot(epochs, self.training_history['val_rmse'], 'r-', label='Val RMSE')
+            axes[1].set_title('Training and Validation RMSE')
+            axes[1].set_xlabel('Epoch')
+            axes[1].set_ylabel('RMSE')
         axes[1].legend()
         axes[1].grid(True)
         
@@ -902,8 +1001,8 @@ class BGRUPredictor:
             batch_size: Batch size for inference (default: 64)
         
         Returns:
-            predictions: Binary predictions (0 or 1)
-            probabilities: Probability scores
+            predictions: Binary predictions (0 or 1) for classification, or continuous predictions for regression
+            probabilities: Probability scores (classification) or same as predictions for regression
         """
         if self.model is None:
             raise ValueError("Model not built or loaded. Call build_model() or load_model() first.")
@@ -931,8 +1030,13 @@ class BGRUPredictor:
                 outputs = self.model(batch_X)
                 all_probs.extend(outputs.cpu().numpy())
         
-        probabilities = np.array(all_probs).flatten()
-        predictions = (probabilities >= 0.5).astype(int)
+        predictions = np.array(all_probs).flatten()
+        if not self.regression:
+            probabilities = predictions
+            predictions = (probabilities >= 0.5).astype(int)
+        else:
+            # Regression: predictions are continuous values; probabilities is same as predictions
+            probabilities = predictions
         
         self.logger.info(f"Generated {len(predictions)} predictions")
         
@@ -959,6 +1063,7 @@ class BGRUPredictor:
             'dropout': self.dropout,
             'feature_columns': self.feature_columns,  # Save feature configuration
             'training_history': self.training_history,
+            'regression': self.regression,
             'saved_at': datetime.now().isoformat()
         }
         
@@ -1010,6 +1115,11 @@ class BGRUPredictor:
         # Load training history if available
         if 'training_history' in checkpoint:
             self.training_history = checkpoint['training_history']
+        # Load regression flag if present
+        if 'regression' in checkpoint:
+            self.regression = bool(checkpoint['regression'])
+            if hasattr(self.model, 'regression'):
+                self.model.regression = self.regression
         
         self.logger.info(f"Model loaded from {path}")
         self.logger.info(f"Model uses {len(self.feature_columns)} features: {self.feature_columns[:5]}...")
@@ -1039,10 +1149,26 @@ def check_class_distribution(df: pd.DataFrame) -> np.ndarray:
     print("="*60)
     
     # Check target distribution
+    if 'target' not in df.columns:
+        raise ValueError("No 'target' column found in DataFrame. Cannot compute class distribution.")
+
     target_counts = df['target'].value_counts()
     print(f"\nTarget Distribution:")
-    print(f"  Class 0 (DOWN): {target_counts[0]} ({target_counts[0]/len(df)*100:.2f}%)")
-    print(f"  Class 1 (UP):   {target_counts[1]} ({target_counts[1]/len(df)*100:.2f}%)")
+    # If the target is not binary e.g., contains continuous values, warn and raise
+    unique_vals = set(df['target'].unique())
+    if unique_vals == {0, 1} or unique_vals == {0.0, 1.0}:
+        zero_count = int(target_counts.get(0, target_counts.get(0.0, 0)))
+        one_count = int(target_counts.get(1, target_counts.get(1.0, 0)))
+        print(f"  Class 0 (DOWN): {zero_count} ({zero_count/len(df)*100:.2f}%)")
+        print(f"  Class 1 (UP):   {one_count} ({one_count/len(df)*100:.2f}%)")
+    else:
+        # Not binary - show distribution and provide guidance
+        print("  WARNING: Target column is not binary. Displaying value counts below:")
+        for val, cnt in target_counts.items():
+            print(f"    Value {val}: {cnt} ({cnt/len(df)*100:.2f}%)")
+        raise ValueError(
+            "Target column is not binary (0/1). If you intended to train a regression model, use the '--regression' flag and provide a 'next_close' or numeric 'target' column."
+        )
     
     # Calculate class weights
     class_weights = compute_class_weight('balanced', 
@@ -1132,6 +1258,11 @@ def main():
         action='store_true',
         help='Use all available features (ohlcv + technical + temporal + price_action)'
     )
+    parser.add_argument(
+        '--regression',
+        action='store_true',
+        help='Train / Predict next day close value as a regression task (use next_close target when present)'
+    )
     
     args = parser.parse_args()
     
@@ -1148,7 +1279,7 @@ def main():
     logger.info(f"Using feature groups: {feature_groups}")
     
     # Initialize predictor with feature groups
-    predictor = BGRUPredictor(feature_groups=feature_groups)
+    predictor = BGRUPredictor(feature_groups=feature_groups, regression=args.regression)
     
     if args.train:
         # Load training and validation data
@@ -1163,8 +1294,14 @@ def main():
         logger.info(f"Loading training data from {train_path}")
         train_df = pd.read_csv(train_path, index_col=0, parse_dates=True)
 
-        class_weights = check_class_distribution(train_df)
-        logger.info(f"Using class weights: {class_weights}")
+        if not args.regression:
+            class_weights = check_class_distribution(train_df)
+            # Convert to tensor for train() if we have values
+            import torch as _torch
+            class_weights = _torch.tensor(class_weights, dtype=_torch.float32) if class_weights is not None else None
+            logger.info(f"Using class weights: {class_weights}")
+        else:
+            class_weights = None
         
         logger.info(f"Loading validation data from {val_path}")
         val_df = pd.read_csv(val_path, index_col=0, parse_dates=True)
@@ -1180,6 +1317,7 @@ def main():
             batch_size=args.batch_size,
             lr=args.lr,
             sequence_length=args.sequence_length,
+            class_weights=class_weights,
             checkpoint_dir=args.checkpoint_dir,
             log_dir=args.log_dir
         )
@@ -1225,12 +1363,24 @@ def main():
         results_df.to_csv(output_path, index=False)
         logger.info(f"Predictions saved to {output_path}")
         
-        # Calculate accuracy if targets are available
-        if 'target' in test_df.columns:
+        # Calculate evaluation metrics if targets are available
+        target_col = None
+        if predictor.regression:
+            # regression expects next_close as target
+            target_col = 'next_close' if 'next_close' in test_df.columns else 'target' if 'target' in test_df.columns else None
+        else:
+            target_col = 'target' if 'target' in test_df.columns else None
+
+        if target_col is not None:
             _, y_test = predictor.prepare_sequences(test_df, args.sequence_length)
             if len(y_test) == len(predictions):
-                accuracy = (predictions == y_test).mean()
-                logger.info(f"Test Accuracy: {accuracy:.4f}")
+                if predictor.regression:
+                    mse = float(((predictions - y_test) ** 2).mean())
+                    rmse = float(np.sqrt(mse))
+                    logger.info(f"Test MSE: {mse:.4f}, RMSE: {rmse:.4f}")
+                else:
+                    accuracy = (predictions == y_test).mean()
+                    logger.info(f"Test Accuracy: {accuracy:.4f}")
     
     if not args.train and not args.predict:
         parser.print_help()

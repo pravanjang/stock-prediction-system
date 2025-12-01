@@ -1,46 +1,37 @@
 ======================================================================
-=== FINAL MODEL EVALUATION ===
+=== FINAL MODEL EVALUATION (REGRESSION) ===
 ======================================================================
-Generated: 2025-11-30 18:56:39
+Generated: 2025-12-01 19:02:23
 
-Classification Metrics:
+Regression Metrics:
 ----------------------------------------------------------------------
-✗ Accuracy: 30.4% [TARGET: 60%] - FAIL
-✗ Precision: 30.3% [TARGET: 55%] - FAIL
-✓ Recall: 100.0% [TARGET: 55%] - PASS
-✓ F1-Score: 46.5%
-✓ ROC-AUC: 0.499
+✓ RMSE: 7632.075316
+✓ MAE: 7285.160534
+✓ MSE: 58248573.634831
+✗ R² Score: -2.0436 [TARGET: 0.5] - FAIL
+✓ MAPE: 14.37%
+✓ SMAPE: 15.57%
 
-Per-Class Metrics:
-  Class 0 (DOWN): Precision=100.0%, Recall=0.2%
-  Class 1 (UP):   Precision=30.3%, Recall=100.0%
-
-Backtesting Results:
+Directional Analysis:
 ----------------------------------------------------------------------
-✓ Total Return: -3.4%
-✗ Win Rate: 49.9% [TARGET: 55%] - FAIL
-✓ Profit Factor: 0.97
-✓ Max Drawdown: -578.9%
-✗ Sharpe Ratio: -0.22 [TARGET: 1.0] - FAIL
-✓ Sortino Ratio: -0.30
-✓ Total Trades: 641
-✓ Average Holding Time: 1 candle(s)
+✗ Directional Accuracy: 54.0% [TARGET: 55%] - FAIL
 
-Trade Statistics:
+Error Statistics:
 ----------------------------------------------------------------------
-  Winning Trades: 320
-  Losing Trades: 321
-  Long Trades: 640
-  Short Trades: 1
-  Avg Profit/Winning Trade: ₹11,048.81
-  Avg Loss/Losing Trade: ₹-11,306.61
-  Best Trade: ₹73,424.50
-  Worst Trade: ₹-142,867.83
-  Total P&L: ₹-93,801.67
+  Mean Error: -7285.160534
+  Std Error: 2274.864750
+  Median Absolute Error: 6936.934453
+  90th Percentile Abs Error: 10534.689219
+  95th Percentile Abs Error: 11262.423203
+  Max Overprediction: -2059.347266
+  Max Underprediction: -13744.269766
 
-======================================================================
-SUCCESS CRITERIA SUMMARY
-======================================================================
-Overall: 1/5 criteria PASSED 
-Some criteria not met. Review model performance.
+Data Statistics:
+----------------------------------------------------------------------
+  Total Samples: 621
+  Target Mean: 50186.9082
+  Target Std: 4374.7333
+  Prediction Mean: 42901.7477
+  Prediction Std: 3365.6943
+
 ======================================================================

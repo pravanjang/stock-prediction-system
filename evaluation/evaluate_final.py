@@ -33,6 +33,9 @@ from sklearn.metrics import (
     roc_curve,
     classification_report,
     precision_recall_curve,
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
 )
 
 # Add parent directory to path for imports
@@ -288,7 +291,8 @@ def plot_threshold_analysis(
 def load_final_model_and_data(
     model_path: str,
     test_data_path: str,
-    sequence_length: int = 60
+    sequence_length: int = 60,
+    regression: bool = False
 ) -> Tuple[BGRUXGBoostEnsemble, pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
     """
     Load the final ensemble model and test data.
@@ -297,11 +301,15 @@ def load_final_model_and_data(
         model_path: Path to the ensemble model checkpoint (.pkl file)
         test_data_path: Path to the test CSV file
         sequence_length: Sequence length used during training
+        regression: Whether to use regression mode
     
     Returns:
         Tuple of (ensemble, test_df, y_true, y_pred, y_pred_proba)
+        For regression mode, y_pred and y_pred_proba are the same (continuous predictions)
     """
     logger.info(f"Loading ensemble model from {model_path}")
+    mode_str = "regression" if regression else "classification"
+    logger.info(f"Mode: {mode_str}")
     
     # Determine BGRU model path from ensemble or use default
     ensemble_dir = Path(model_path).parent
@@ -310,10 +318,11 @@ def load_final_model_and_data(
     if not os.path.exists(bgru_model_path):
         bgru_model_path = str(ensemble_dir / 'bgru_baseline.pt')
     
-    # Initialize ensemble
+    # Initialize ensemble with regression flag
     ensemble = BGRUXGBoostEnsemble(
         bgru_model_path=bgru_model_path,
-        sequence_length=sequence_length
+        sequence_length=sequence_length,
+        regression=regression
     )
     
     # Load ensemble components (XGBoost, stacking model, weights)
@@ -422,6 +431,382 @@ def calculate_all_metrics(
     logger.info(f"ROC-AUC: {metrics['roc_auc']:.4f}")
     
     return metrics
+
+
+def calculate_regression_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray
+) -> Dict[str, Any]:
+    """
+    Calculate comprehensive regression metrics.
+    
+    Args:
+        y_true: Ground truth continuous values
+        y_pred: Predicted continuous values
+    
+    Returns:
+        Dictionary containing all calculated regression metrics
+    """
+    metrics = {}
+    
+    # Core regression metrics
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    
+    metrics['mse'] = float(mse)
+    metrics['rmse'] = float(rmse)
+    metrics['mae'] = float(mae)
+    metrics['r2'] = float(r2)
+    
+    # Additional regression metrics
+    # Mean Absolute Percentage Error (MAPE) - avoid division by zero
+    non_zero_mask = np.abs(y_true) > 1e-8
+    if np.sum(non_zero_mask) > 0:
+        mape = np.mean(np.abs((y_true[non_zero_mask] - y_pred[non_zero_mask]) / y_true[non_zero_mask])) * 100
+        metrics['mape'] = float(mape)
+    else:
+        metrics['mape'] = float('nan')
+    
+    # Symmetric MAPE
+    smape = np.mean(2 * np.abs(y_pred - y_true) / (np.abs(y_true) + np.abs(y_pred) + 1e-8)) * 100
+    metrics['smape'] = float(smape)
+    
+    # Directional accuracy (for trading - did we predict the direction correctly?)
+    # Compare changes from previous value
+    if len(y_true) > 1:
+        true_direction = np.sign(np.diff(y_true))
+        pred_direction = np.sign(np.diff(y_pred))
+        directional_accuracy = np.mean(true_direction == pred_direction)
+        metrics['directional_accuracy'] = float(directional_accuracy)
+    else:
+        metrics['directional_accuracy'] = float('nan')
+    
+    # Error statistics
+    errors = y_pred - y_true
+    metrics['mean_error'] = float(np.mean(errors))
+    metrics['std_error'] = float(np.std(errors))
+    metrics['max_overpredict'] = float(np.max(errors))
+    metrics['max_underpredict'] = float(np.min(errors))
+    
+    # Percentile errors
+    abs_errors = np.abs(errors)
+    metrics['median_abs_error'] = float(np.median(abs_errors))
+    metrics['p90_abs_error'] = float(np.percentile(abs_errors, 90))
+    metrics['p95_abs_error'] = float(np.percentile(abs_errors, 95))
+    
+    # Sample statistics
+    metrics['total_samples'] = int(len(y_true))
+    metrics['target_mean'] = float(np.mean(y_true))
+    metrics['target_std'] = float(np.std(y_true))
+    metrics['prediction_mean'] = float(np.mean(y_pred))
+    metrics['prediction_std'] = float(np.std(y_pred))
+    
+    logger.info(f"MSE: {metrics['mse']:.6f}")
+    logger.info(f"RMSE: {metrics['rmse']:.6f}")
+    logger.info(f"MAE: {metrics['mae']:.6f}")
+    logger.info(f"R²: {metrics['r2']:.6f}")
+    logger.info(f"MAPE: {metrics['mape']:.2f}%")
+    logger.info(f"Directional Accuracy: {metrics['directional_accuracy']:.4f}")
+    
+    return metrics
+
+
+def plot_regression_predictions(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    save_path: str,
+    title: str = 'Predicted vs Actual Values'
+) -> None:
+    """
+    Plot predicted vs actual values for regression.
+    
+    Args:
+        y_true: Ground truth values
+        y_pred: Predicted values
+        save_path: Path to save the plot
+        title: Plot title
+    """
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Scatter plot of predicted vs actual
+    ax1 = axes[0]
+    ax1.scatter(y_true, y_pred, alpha=0.5, s=10)
+    
+    # Perfect prediction line
+    min_val = min(y_true.min(), y_pred.min())
+    max_val = max(y_true.max(), y_pred.max())
+    ax1.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect Prediction')
+    
+    ax1.set_xlabel('Actual Values', fontsize=12)
+    ax1.set_ylabel('Predicted Values', fontsize=12)
+    ax1.set_title(title, fontsize=14)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Add R² annotation
+    r2 = r2_score(y_true, y_pred)
+    ax1.annotate(f'R² = {r2:.4f}', xy=(0.05, 0.95), xycoords='axes fraction',
+                fontsize=12, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Error distribution histogram
+    ax2 = axes[1]
+    errors = y_pred - y_true
+    ax2.hist(errors, bins=50, edgecolor='black', alpha=0.7)
+    ax2.axvline(x=0, color='r', linestyle='--', lw=2, label='Zero Error')
+    ax2.axvline(x=np.mean(errors), color='g', linestyle='-', lw=2, label=f'Mean Error: {np.mean(errors):.4f}')
+    ax2.set_xlabel('Prediction Error', fontsize=12)
+    ax2.set_ylabel('Frequency', fontsize=12)
+    ax2.set_title('Error Distribution', fontsize=14)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    
+    logger.info(f"Regression predictions plot saved to {save_path}")
+
+
+def plot_regression_time_series(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    save_path: str,
+    title: str = 'Predictions Over Time'
+) -> None:
+    """
+    Plot time series of actual vs predicted values.
+    
+    Args:
+        y_true: Ground truth values
+        y_pred: Predicted values
+        save_path: Path to save the plot
+        title: Plot title
+    """
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+    
+    # Time series plot
+    ax1 = axes[0]
+    x = np.arange(len(y_true))
+    ax1.plot(x, y_true, label='Actual', alpha=0.7, linewidth=1)
+    ax1.plot(x, y_pred, label='Predicted', alpha=0.7, linewidth=1)
+    ax1.set_xlabel('Sample Index', fontsize=12)
+    ax1.set_ylabel('Value', fontsize=12)
+    ax1.set_title(title, fontsize=14)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Error over time
+    ax2 = axes[1]
+    errors = y_pred - y_true
+    ax2.fill_between(x, 0, errors, alpha=0.5, label='Error')
+    ax2.axhline(y=0, color='r', linestyle='--', lw=1)
+    ax2.set_xlabel('Sample Index', fontsize=12)
+    ax2.set_ylabel('Prediction Error', fontsize=12)
+    ax2.set_title('Prediction Error Over Time', fontsize=14)
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    
+    logger.info(f"Regression time series plot saved to {save_path}")
+
+
+def generate_regression_report(
+    metrics: Dict[str, Any],
+    output_dir: str = 'evaluation/reports'
+) -> Tuple[str, str]:
+    """
+    Generate comprehensive regression evaluation reports (HTML and text).
+    
+    Args:
+        metrics: Regression metrics dictionary
+        output_dir: Output directory for reports
+    
+    Returns:
+        Tuple of (html_path, txt_path)
+    """
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Generate text report
+    txt_path = os.path.join(output_dir, 'final_report.txt')
+    txt_content = _generate_regression_text_report(metrics)
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write(txt_content)
+    logger.info(f"Text report saved to {txt_path}")
+    
+    # Generate HTML report
+    html_path = os.path.join(output_dir, 'final_report.html')
+    html_content = _generate_regression_html_report(metrics)
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    logger.info(f"HTML report saved to {html_path}")
+    
+    return html_path, txt_path
+
+
+def _generate_regression_text_report(metrics: Dict[str, Any]) -> str:
+    """Generate regression text report content."""
+    lines = []
+    
+    lines.append("=" * 70)
+    lines.append("=== FINAL MODEL EVALUATION (REGRESSION) ===")
+    lines.append("=" * 70)
+    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+    
+    # Core Regression Metrics
+    lines.append("Regression Metrics:")
+    lines.append("-" * 70)
+    
+    rmse = metrics.get('rmse', 0)
+    lines.append(f"✓ RMSE: {rmse:.6f}")
+    
+    mae = metrics.get('mae', 0)
+    lines.append(f"✓ MAE: {mae:.6f}")
+    
+    mse = metrics.get('mse', 0)
+    lines.append(f"✓ MSE: {mse:.6f}")
+    
+    r2 = metrics.get('r2', 0)
+    r2_pass = r2 >= 0.5
+    lines.append(f"{'✓' if r2_pass else '✗'} R² Score: {r2:.4f} [TARGET: 0.5] - {'PASS' if r2_pass else 'FAIL'}")
+    
+    mape = metrics.get('mape', float('nan'))
+    if not np.isnan(mape):
+        lines.append(f"✓ MAPE: {mape:.2f}%")
+    
+    smape = metrics.get('smape', 0)
+    lines.append(f"✓ SMAPE: {smape:.2f}%")
+    lines.append("")
+    
+    # Directional Accuracy
+    lines.append("Directional Analysis:")
+    lines.append("-" * 70)
+    dir_acc = metrics.get('directional_accuracy', float('nan'))
+    if not np.isnan(dir_acc):
+        dir_pass = dir_acc >= 0.55
+        lines.append(f"{'✓' if dir_pass else '✗'} Directional Accuracy: {dir_acc*100:.1f}% [TARGET: 55%] - {'PASS' if dir_pass else 'FAIL'}")
+    lines.append("")
+    
+    # Error Statistics
+    lines.append("Error Statistics:")
+    lines.append("-" * 70)
+    lines.append(f"  Mean Error: {metrics.get('mean_error', 0):.6f}")
+    lines.append(f"  Std Error: {metrics.get('std_error', 0):.6f}")
+    lines.append(f"  Median Absolute Error: {metrics.get('median_abs_error', 0):.6f}")
+    lines.append(f"  90th Percentile Abs Error: {metrics.get('p90_abs_error', 0):.6f}")
+    lines.append(f"  95th Percentile Abs Error: {metrics.get('p95_abs_error', 0):.6f}")
+    lines.append(f"  Max Overprediction: {metrics.get('max_overpredict', 0):.6f}")
+    lines.append(f"  Max Underprediction: {metrics.get('max_underpredict', 0):.6f}")
+    lines.append("")
+    
+    # Data Statistics
+    lines.append("Data Statistics:")
+    lines.append("-" * 70)
+    lines.append(f"  Total Samples: {metrics.get('total_samples', 0):,}")
+    lines.append(f"  Target Mean: {metrics.get('target_mean', 0):.4f}")
+    lines.append(f"  Target Std: {metrics.get('target_std', 0):.4f}")
+    lines.append(f"  Prediction Mean: {metrics.get('prediction_mean', 0):.4f}")
+    lines.append(f"  Prediction Std: {metrics.get('prediction_std', 0):.4f}")
+    lines.append("")
+    
+    lines.append("=" * 70)
+    
+    return '\n'.join(lines)
+
+
+def _generate_regression_html_report(metrics: Dict[str, Any]) -> str:
+    """Generate regression HTML report content."""
+    r2 = metrics.get('r2', 0)
+    r2_pass = r2 >= 0.5
+    dir_acc = metrics.get('directional_accuracy', float('nan'))
+    dir_pass = dir_acc >= 0.55 if not np.isnan(dir_acc) else False
+    
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Final Model Evaluation - Regression</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
+        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+        h2 {{ color: #34495e; margin-top: 30px; }}
+        .metric {{ display: inline-block; width: 200px; padding: 15px; margin: 10px; background: #ecf0f1; border-radius: 8px; text-align: center; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2c3e50; }}
+        .metric-label {{ font-size: 12px; color: #7f8c8d; margin-top: 5px; }}
+        .pass {{ background-color: #d4edda; border: 2px solid #28a745; }}
+        .fail {{ background-color: #f8d7da; border: 2px solid #dc3545; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+        th {{ background-color: #3498db; color: white; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        .timestamp {{ color: #95a5a6; font-size: 12px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Final Model Evaluation Report - Regression</h1>
+        <p class="timestamp">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        
+        <h2>Core Regression Metrics</h2>
+        <div class="metric {'pass' if r2_pass else 'fail'}">
+            <div class="metric-value">{r2:.4f}</div>
+            <div class="metric-label">R² Score (Target: 0.5)</div>
+        </div>
+        <div class="metric">
+            <div class="metric-value">{metrics.get('rmse', 0):.4f}</div>
+            <div class="metric-label">RMSE</div>
+        </div>
+        <div class="metric">
+            <div class="metric-value">{metrics.get('mae', 0):.4f}</div>
+            <div class="metric-label">MAE</div>
+        </div>
+        <div class="metric">
+            <div class="metric-value">{metrics.get('mape', 0):.2f}%</div>
+            <div class="metric-label">MAPE</div>
+        </div>
+        
+        <h2>Directional Analysis</h2>
+        <div class="metric {'pass' if dir_pass else 'fail'}">
+            <div class="metric-value">{dir_acc*100:.1f}%</div>
+            <div class="metric-label">Directional Accuracy (Target: 55%)</div>
+        </div>
+        
+        <h2>Error Statistics</h2>
+        <table>
+            <tr><th>Metric</th><th>Value</th></tr>
+            <tr><td>Mean Error</td><td>{metrics.get('mean_error', 0):.6f}</td></tr>
+            <tr><td>Std Error</td><td>{metrics.get('std_error', 0):.6f}</td></tr>
+            <tr><td>Median Absolute Error</td><td>{metrics.get('median_abs_error', 0):.6f}</td></tr>
+            <tr><td>90th Percentile Abs Error</td><td>{metrics.get('p90_abs_error', 0):.6f}</td></tr>
+            <tr><td>95th Percentile Abs Error</td><td>{metrics.get('p95_abs_error', 0):.6f}</td></tr>
+            <tr><td>Max Overprediction</td><td>{metrics.get('max_overpredict', 0):.6f}</td></tr>
+            <tr><td>Max Underprediction</td><td>{metrics.get('max_underpredict', 0):.6f}</td></tr>
+        </table>
+        
+        <h2>Data Statistics</h2>
+        <table>
+            <tr><th>Metric</th><th>Value</th></tr>
+            <tr><td>Total Samples</td><td>{metrics.get('total_samples', 0):,}</td></tr>
+            <tr><td>Target Mean</td><td>{metrics.get('target_mean', 0):.4f}</td></tr>
+            <tr><td>Target Std</td><td>{metrics.get('target_std', 0):.4f}</td></tr>
+            <tr><td>Prediction Mean</td><td>{metrics.get('prediction_mean', 0):.4f}</td></tr>
+            <tr><td>Prediction Std</td><td>{metrics.get('prediction_std', 0):.4f}</td></tr>
+        </table>
+    </div>
+</body>
+</html>
+"""
+    return html
 
 
 # =============================================================================
@@ -1443,6 +1828,11 @@ def main():
         default=0.0003,
         help='Transaction cost per trade (default: 0.03%%)'
     )
+    parser.add_argument(
+        '--regression',
+        action='store_true',
+        help='Evaluate in regression mode (predict continuous values) instead of classification'
+    )
     
     args = parser.parse_args()
     
@@ -1465,12 +1855,86 @@ def main():
     logger.info("FINAL MODEL EVALUATION")
     logger.info("=" * 60)
     
+    mode_str = "REGRESSION" if args.regression else "CLASSIFICATION"
+    logger.info(f"Mode: {mode_str}")
+    
     # Load model and data
     ensemble, test_df, y_true, y_pred, y_pred_proba = load_final_model_and_data(
         model_path=args.model,
         test_data_path=args.data,
-        sequence_length=args.sequence_length
+        sequence_length=args.sequence_length,
+        regression=args.regression
     )
+    
+    if args.regression:
+        # =================================================================
+        # REGRESSION EVALUATION
+        # =================================================================
+        logger.info("-" * 60)
+        logger.info("Calculating regression metrics...")
+        
+        # For regression, y_pred and y_pred_proba are the same (continuous predictions)
+        metrics = calculate_regression_metrics(y_true, y_pred)
+        
+        # Generate regression visualizations
+        logger.info("-" * 60)
+        logger.info("Generating regression visualizations...")
+        
+        # Predicted vs Actual plot
+        plot_regression_predictions(
+            y_true, y_pred,
+            save_path=os.path.join(plots_dir, 'regression_predictions.png'),
+            title='Predicted vs Actual Close Prices'
+        )
+        
+        # Time series plot
+        plot_regression_time_series(
+            y_true, y_pred,
+            save_path=os.path.join(plots_dir, 'regression_time_series.png'),
+            title='Predictions Over Time'
+        )
+        
+        # Generate regression reports
+        logger.info("-" * 60)
+        logger.info("Generating regression reports...")
+        generate_regression_report(
+            metrics=metrics,
+            output_dir=reports_dir
+        )
+        
+        # Save metrics as JSON
+        all_results = {
+            'regression_metrics': metrics,
+            'evaluation_config': {
+                'model_path': args.model,
+                'data_path': args.data,
+                'sequence_length': args.sequence_length,
+                'mode': 'regression',
+                'evaluated_at': datetime.now().isoformat()
+            }
+        }
+        
+        json_path = os.path.join(reports_dir, 'final_metrics.json')
+        with open(json_path, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        logger.info(f"Metrics JSON saved to {json_path}")
+        
+        # Print summary
+        print("\n")
+        with open(os.path.join(reports_dir, 'final_report.txt'), 'r', encoding='utf-8') as f:
+            print(f.read())
+        
+        logger.info("=" * 60)
+        logger.info("Regression evaluation complete!")
+        logger.info("=" * 60)
+        logger.info(f"Reports saved to: {reports_dir}")
+        logger.info(f"Plots saved to: {plots_dir}")
+        
+        return 0
+    
+    # =========================================================================
+    # CLASSIFICATION EVALUATION
+    # =========================================================================
     
     # =========================================================================
     # THRESHOLD OPTIMIZATION (Key improvement for recall/precision)

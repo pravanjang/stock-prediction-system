@@ -25,8 +25,13 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from scipy.optimize import minimize
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
+from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import (
+    accuracy_score,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
 
 # Add parent directory to path for imports when running as script
 if __name__ == '__main__':
@@ -130,20 +135,21 @@ def get_all_features() -> List[str]:
 
 class BGRUXGBoostEnsemble:
     """
-    Ensemble model combining Hybrid BGRU and XGBoost for directional prediction.
+    Ensemble model combining Hybrid BGRU and XGBoost for directional prediction or regression.
     
     Ensemble Strategy:
         Model 1: Trained BGRU model (HybridBGRUModel from Phase 2)
-        Model 2: XGBoost classifier on same features
-        Fusion: Weighted average, stacking, or voting
+        Model 2: XGBoost classifier/regressor on same features
+        Fusion: Weighted average, stacking, or voting (classification) / weighted average (regression)
     
     Attributes:
         bgru_model: HybridBGRUModel instance
-        xgb_model: XGBoost classifier
-        stacking_model: LogisticRegression for stacking ensemble
+        xgb_model: XGBoost classifier or regressor
+        stacking_model: LogisticRegression (classification) or Ridge (regression) for stacking ensemble
         weights: Ensemble weights for weighted average
         sequence_length: Sequence length for BGRU input
         feature_columns: List of feature column names for XGBoost
+        regression: Whether to use regression mode (predict next-day close)
     """
     
     def __init__(
@@ -156,7 +162,8 @@ class BGRUXGBoostEnsemble:
         selected_features_path: Optional[str] = None,
         hidden_dim: int = 128,
         num_layers: int = 2,
-        dropout: float = 0.3
+        dropout: float = 0.3,
+        regression: bool = False
     ):
         """
         Initialize the Ensemble model.
@@ -182,6 +189,7 @@ class BGRUXGBoostEnsemble:
         self.bgru_model_path = bgru_model_path
         self.sequence_length = sequence_length
         self.n_features = n_features
+        self.regression = regression
         
         # Setup logging
         self.logger = logging.getLogger(__name__)
@@ -230,10 +238,11 @@ class BGRUXGBoostEnsemble:
             )
         
         # Initialize XGBoost model (will be trained later)
-        self.xgb_model: Optional[xgb.XGBClassifier] = None
+        # Use XGBRegressor for regression, XGBClassifier for classification
+        self.xgb_model: Optional[xgb.XGBClassifier] = None  # type: ignore
         
-        # Initialize stacking model
-        self.stacking_model: Optional[LogisticRegression] = None
+        # Initialize stacking model (Ridge for regression, LogisticRegression for classification)
+        self.stacking_model: Optional[LogisticRegression] = None  # type: ignore
         
         # Default ensemble weights: BGRU (60%), XGBoost (40%)
         self.weights: List[float] = [0.6, 0.4]
@@ -255,8 +264,9 @@ class BGRUXGBoostEnsemble:
                 f"Using all {len(self.feature_columns)} features for XGBoost"
             )
         
+        mode_str = 'regression' if self.regression else 'classification'
         self.logger.info(
-            f"Initialized BGRUXGBoostEnsemble with sequence_length={sequence_length}"
+            f"Initialized BGRUXGBoostEnsemble with sequence_length={sequence_length}, mode={mode_str}"
         )
     
     def _prepare_xgb_features(
@@ -324,14 +334,13 @@ class BGRUXGBoostEnsemble:
         """
         Train XGBoost on technical + temporal + price action features.
         
-        Improved Hyperparameters for better generalization:
-            - max_depth: 4 (reduced from 6 to prevent overfitting)
-            - learning_rate: 0.05 (reduced for more gradual learning)
-            - n_estimators: 200 (increased for better ensemble)
-            - min_child_weight: 3 (regularization)
-            - reg_alpha: 0.1 (L1 regularization)
-            - reg_lambda: 1.0 (L2 regularization)
-            - scale_pos_weight_multiplier: 1.5 (more aggressive minority class weight)
+        For classification:
+            - Uses XGBClassifier with binary:logistic objective
+            - Class weights for imbalanced data
+        
+        For regression:
+            - Uses XGBRegressor with reg:squarederror objective
+            - Reports MSE, RMSE, MAE, R² metrics
         
         Args:
             train_df: Training DataFrame
@@ -344,15 +353,16 @@ class BGRUXGBoostEnsemble:
             min_child_weight: Minimum sum of instance weight in child (default: 3)
             reg_alpha: L1 regularization term (default: 0.1)
             reg_lambda: L2 regularization term (default: 1.0)
-            scale_pos_weight_multiplier: Multiplier for minority class weight (default: 1.5)
+            scale_pos_weight_multiplier: Multiplier for minority class weight (default: 1.5, classification only)
             random_state: Random seed (default: 42)
             verbose: Whether to print training progress (default: False)
         
         Returns:
             Dictionary containing training and validation metrics
         """
+        mode_str = 'Regression' if self.regression else 'Classification'
         self.logger.info("=" * 60)
-        self.logger.info("Training XGBoost Model")
+        self.logger.info(f"Training XGBoost Model ({mode_str})")
         self.logger.info("=" * 60)
         
         # Prepare features
@@ -366,54 +376,108 @@ class BGRUXGBoostEnsemble:
         self.logger.info(f"Validation samples: {len(X_val)}")
         self.logger.info(f"Features: {len(self.feature_columns)}")
         
-        # Calculate class weights with multiplier for more aggressive minority handling
-        n_pos = np.sum(y_train == 1)
-        n_neg = np.sum(y_train == 0)
-        base_scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
-        scale_pos_weight = base_scale_pos_weight * scale_pos_weight_multiplier
+        if self.regression:
+            # Regression mode: XGBRegressor
+            self.logger.info(f"Target range (train): [{y_train.min():.2f}, {y_train.max():.2f}]")
+            
+            self.xgb_model = xgb.XGBRegressor(
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                n_estimators=n_estimators,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                min_child_weight=min_child_weight,
+                reg_alpha=reg_alpha,
+                reg_lambda=reg_lambda,
+                random_state=random_state,
+                objective='reg:squarederror',
+                eval_metric='rmse'
+            )
+            
+            # Train
+            self.xgb_model.fit(
+                X_train, y_train,
+                eval_set=[(X_train, y_train), (X_val, y_val)],
+                verbose=verbose
+            )
+            
+            # Evaluate regression metrics
+            train_preds = self.xgb_model.predict(X_train)
+            val_preds = self.xgb_model.predict(X_val)
+            
+            train_mse = mean_squared_error(y_train, train_preds)
+            val_mse = mean_squared_error(y_val, val_preds)
+            train_rmse = np.sqrt(train_mse)
+            val_rmse = np.sqrt(val_mse)
+            train_mae = mean_absolute_error(y_train, train_preds)
+            val_mae = mean_absolute_error(y_val, val_preds)
+            train_r2 = r2_score(y_train, train_preds)
+            val_r2 = r2_score(y_val, val_preds)
+            
+            metrics = {
+                'train_mse': float(train_mse),
+                'val_mse': float(val_mse),
+                'train_rmse': float(train_rmse),
+                'val_rmse': float(val_rmse),
+                'train_mae': float(train_mae),
+                'val_mae': float(val_mae),
+                'train_r2': float(train_r2),
+                'val_r2': float(val_r2)
+            }
+            
+            self.logger.info(f"XGBoost Train RMSE: {train_rmse:.4f}, MAE: {train_mae:.4f}, R²: {train_r2:.4f}")
+            self.logger.info(f"XGBoost Val RMSE: {val_rmse:.4f}, MAE: {val_mae:.4f}, R²: {val_r2:.4f}")
+        else:
+            # Classification mode: XGBClassifier
+            # Calculate class weights with multiplier for more aggressive minority handling
+            n_pos = np.sum(y_train == 1)
+            n_neg = np.sum(y_train == 0)
+            base_scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+            scale_pos_weight = base_scale_pos_weight * scale_pos_weight_multiplier
+            
+            self.logger.info(f"Class distribution: {n_neg} negative, {n_pos} positive")
+            self.logger.info(f"Base scale pos weight: {base_scale_pos_weight:.4f}")
+            self.logger.info(f"Applied scale pos weight (with {scale_pos_weight_multiplier}x multiplier): {scale_pos_weight:.4f}")
+            
+            # Initialize XGBoost classifier with improved regularization
+            self.xgb_model = xgb.XGBClassifier(
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                n_estimators=n_estimators,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                min_child_weight=min_child_weight,
+                reg_alpha=reg_alpha,
+                reg_lambda=reg_lambda,
+                scale_pos_weight=scale_pos_weight,
+                random_state=random_state,
+                objective='binary:logistic',
+                eval_metric='logloss',
+                use_label_encoder=False
+            )
+            
+            # Train with early stopping
+            self.xgb_model.fit(
+                X_train, y_train,
+                eval_set=[(X_train, y_train), (X_val, y_val)],
+                verbose=verbose
+            )
+            
+            # Evaluate
+            train_preds = self.xgb_model.predict(X_train)
+            val_preds = self.xgb_model.predict(X_val)
+            
+            train_acc = accuracy_score(y_train, train_preds)
+            val_acc = accuracy_score(y_val, val_preds)
+            
+            metrics = {
+                'train_accuracy': train_acc,
+                'val_accuracy': val_acc
+            }
+            
+            self.logger.info(f"XGBoost Train Accuracy: {train_acc:.4f}")
+            self.logger.info(f"XGBoost Validation Accuracy: {val_acc:.4f}")
         
-        self.logger.info(f"Class distribution: {n_neg} negative, {n_pos} positive")
-        self.logger.info(f"Base scale pos weight: {base_scale_pos_weight:.4f}")
-        self.logger.info(f"Applied scale pos weight (with {scale_pos_weight_multiplier}x multiplier): {scale_pos_weight:.4f}")
-        
-        # Initialize XGBoost classifier with improved regularization
-        self.xgb_model = xgb.XGBClassifier(
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            n_estimators=n_estimators,
-            subsample=subsample,
-            colsample_bytree=colsample_bytree,
-            min_child_weight=min_child_weight,
-            reg_alpha=reg_alpha,
-            reg_lambda=reg_lambda,
-            scale_pos_weight=scale_pos_weight,
-            random_state=random_state,
-            objective='binary:logistic',
-            eval_metric='logloss',
-            use_label_encoder=False
-        )
-        
-        # Train with early stopping
-        self.xgb_model.fit(
-            X_train, y_train,
-            eval_set=[(X_train, y_train), (X_val, y_val)],
-            verbose=verbose
-        )
-        
-        # Evaluate
-        train_preds = self.xgb_model.predict(X_train)
-        val_preds = self.xgb_model.predict(X_val)
-        
-        train_acc = accuracy_score(y_train, train_preds)
-        val_acc = accuracy_score(y_val, val_preds)
-        
-        metrics = {
-            'train_accuracy': train_acc,
-            'val_accuracy': val_acc
-        }
-        
-        self.logger.info(f"XGBoost Train Accuracy: {train_acc:.4f}")
-        self.logger.info(f"XGBoost Validation Accuracy: {val_acc:.4f}")
         self.logger.info("=" * 60)
         
         return metrics
@@ -424,33 +488,39 @@ class BGRUXGBoostEnsemble:
         batch_size: int = 64
     ) -> np.ndarray:
         """
-        Get probability predictions from BGRU model.
+        Get predictions from BGRU model.
+        
+        For classification: returns probability scores.
+        For regression: returns continuous predicted values.
         
         Args:
             df: DataFrame with features
             batch_size: Batch size for inference
         
         Returns:
-            Probability array of shape [num_samples]
+            Array of predictions (probabilities for classification, values for regression)
         """
         if self.bgru_model.model is None:
             raise ValueError("BGRU model not loaded or trained")
         
-        _, probabilities = self.bgru_model.predict(df, batch_size=batch_size)
-        return probabilities
+        _, predictions = self.bgru_model.predict(df, batch_size=batch_size)
+        return predictions
     
     def _get_xgb_predictions(
         self,
         df: pd.DataFrame
     ) -> np.ndarray:
         """
-        Get probability predictions from XGBoost model.
+        Get predictions from XGBoost model.
+        
+        For classification: returns probability scores (class 1 probability).
+        For regression: returns continuous predicted values.
         
         Args:
             df: DataFrame with features
         
         Returns:
-            Probability array of shape [num_samples]
+            Array of predictions
         """
         if self.xgb_model is None:
             raise ValueError("XGBoost model not trained")
@@ -464,8 +534,13 @@ class BGRUXGBoostEnsemble:
         n_bgru_samples = len(df) - self.sequence_length
         X_aligned = X[self.sequence_length - 1:self.sequence_length - 1 + n_bgru_samples]
         
-        probabilities = self.xgb_model.predict_proba(X_aligned)[:, 1]
-        return probabilities
+        if self.regression:
+            # Regression: direct prediction
+            predictions = self.xgb_model.predict(X_aligned)
+        else:
+            # Classification: probability of class 1
+            predictions = self.xgb_model.predict_proba(X_aligned)[:, 1]
+        return predictions
     
     def predict_ensemble(
         self,
@@ -477,70 +552,105 @@ class BGRUXGBoostEnsemble:
         """
         Generate ensemble predictions using specified method.
         
-        Ensemble methods:
-            1. Weighted average: BGRU (60%) + XGBoost (40%)
-            2. Stacking: Use logistic regression on predictions
-            3. Voting: Majority vote
+        For classification:
+            - Weighted average, stacking, or voting methods
+            - Returns binary predictions and probability scores
+        
+        For regression:
+            - Weighted average or stacking methods only
+            - Returns continuous predictions
         
         Args:
             test_df: Test DataFrame
             method: Ensemble method ('weighted', 'stacking', or 'voting')
+                    Note: 'voting' is only available for classification
             weights: Ensemble weights for weighted method [bgru_weight, xgb_weight].
                     If None, uses self.weights.
             batch_size: Batch size for BGRU inference
         
         Returns:
-            predictions: Binary predictions (0 or 1)
-            probabilities: Combined probability scores
+            predictions: Binary predictions (classification) or continuous values (regression)
+            probabilities: Combined probability scores (classification) or same as predictions (regression)
         """
         if weights is None:
             weights = self.weights
         
         # Get predictions from both models
-        bgru_probs = self._get_bgru_predictions(test_df, batch_size)
-        xgb_probs = self._get_xgb_predictions(test_df)
+        bgru_preds = self._get_bgru_predictions(test_df, batch_size)
+        xgb_preds = self._get_xgb_predictions(test_df)
         
         # Align predictions (both should have same length now)
-        min_len = min(len(bgru_probs), len(xgb_probs))
-        bgru_probs = bgru_probs[:min_len]
-        xgb_probs = xgb_probs[:min_len]
+        min_len = min(len(bgru_preds), len(xgb_preds))
+        bgru_preds = bgru_preds[:min_len]
+        xgb_preds = xgb_preds[:min_len]
         
-        if method == 'weighted':
-            # Weighted average
-            if len(weights) != 2:
-                raise ValueError("Weights must have exactly 2 elements [bgru_weight, xgb_weight]")
+        if self.regression:
+            # Regression mode: only weighted average or stacking
+            if method == 'voting':
+                self.logger.warning("Voting method not available for regression, using weighted average")
+                method = 'weighted'
             
-            probabilities = weights[0] * bgru_probs + weights[1] * xgb_probs
-            predictions = (probabilities >= 0.5).astype(int)
-            
-        elif method == 'stacking':
-            # Stacking with logistic regression
-            if self.stacking_model is None:
-                raise ValueError(
-                    "Stacking model not trained. Call optimize_weights first "
-                    "or train_stacking_model."
-                )
-            
-            # Stack predictions as features
-            stacked_features = np.column_stack([bgru_probs, xgb_probs])
-            probabilities = self.stacking_model.predict_proba(stacked_features)[:, 1]
-            predictions = self.stacking_model.predict(stacked_features)
-            
-        elif method == 'voting':
-            # Majority voting
-            bgru_votes = (bgru_probs >= 0.5).astype(int)
-            xgb_votes = (xgb_probs >= 0.5).astype(int)
-            
-            # Sum votes (with optional weighting)
-            vote_sum = weights[0] * bgru_votes + weights[1] * xgb_votes
-            predictions = (vote_sum >= 0.5).astype(int)
-            
-            # Probabilities as weighted average of probabilities
-            probabilities = weights[0] * bgru_probs + weights[1] * xgb_probs
-            
+            if method == 'weighted':
+                # Weighted average of continuous predictions
+                if len(weights) != 2:
+                    raise ValueError("Weights must have exactly 2 elements [bgru_weight, xgb_weight]")
+                
+                predictions = weights[0] * bgru_preds + weights[1] * xgb_preds
+                probabilities = predictions  # For regression, probabilities = predictions
+                
+            elif method == 'stacking':
+                # Stacking with Ridge regression
+                if self.stacking_model is None:
+                    raise ValueError(
+                        "Stacking model not trained. Call optimize_weights first."
+                    )
+                
+                # Stack predictions as features
+                stacked_features = np.column_stack([bgru_preds, xgb_preds])
+                predictions = self.stacking_model.predict(stacked_features)
+                probabilities = predictions
+                
+            else:
+                raise ValueError(f"Unknown ensemble method: {method}. "
+                               "Choose from 'weighted' or 'stacking' for regression.")
         else:
-            raise ValueError(f"Unknown ensemble method: {method}. "
-                           "Choose from 'weighted', 'stacking', or 'voting'.")
+            # Classification mode
+            if method == 'weighted':
+                # Weighted average
+                if len(weights) != 2:
+                    raise ValueError("Weights must have exactly 2 elements [bgru_weight, xgb_weight]")
+                
+                probabilities = weights[0] * bgru_preds + weights[1] * xgb_preds
+                predictions = (probabilities >= 0.5).astype(int)
+                
+            elif method == 'stacking':
+                # Stacking with logistic regression
+                if self.stacking_model is None:
+                    raise ValueError(
+                        "Stacking model not trained. Call optimize_weights first "
+                        "or train_stacking_model."
+                    )
+                
+                # Stack predictions as features
+                stacked_features = np.column_stack([bgru_preds, xgb_preds])
+                probabilities = self.stacking_model.predict_proba(stacked_features)[:, 1]
+                predictions = self.stacking_model.predict(stacked_features)
+                
+            elif method == 'voting':
+                # Majority voting
+                bgru_votes = (bgru_preds >= 0.5).astype(int)
+                xgb_votes = (xgb_preds >= 0.5).astype(int)
+                
+                # Sum votes (with optional weighting)
+                vote_sum = weights[0] * bgru_votes + weights[1] * xgb_votes
+                predictions = (vote_sum >= 0.5).astype(int)
+                
+                # Probabilities as weighted average of probabilities
+                probabilities = weights[0] * bgru_preds + weights[1] * xgb_preds
+                
+            else:
+                raise ValueError(f"Unknown ensemble method: {method}. "
+                               "Choose from 'weighted', 'stacking', or 'voting'.")
         
         self.logger.info(f"Generated {len(predictions)} ensemble predictions using {method} method")
         
@@ -557,14 +667,20 @@ class BGRUXGBoostEnsemble:
         """
         Find optimal ensemble weights using validation set.
         
-        Also trains a stacking model (logistic regression) for the
-        stacking ensemble method.
+        For classification:
+            - Trains a stacking model (LogisticRegression)
+            - Optimizes for accuracy, f1, recall, or balanced metric
+        
+        For regression:
+            - Trains a stacking model (Ridge regression)
+            - Optimizes for RMSE (minimize)
         
         Args:
             val_df: Validation DataFrame
             batch_size: Batch size for BGRU inference
             method: Optimization method ('grid_search' or 'scipy')
-            optimize_for: Metric to optimize ('accuracy', 'f1', 'recall', 'balanced')
+            optimize_for: Metric to optimize ('accuracy', 'f1', 'recall', 'balanced' for classification;
+                         'rmse', 'mae', 'r2' for regression)
             min_weight: Minimum weight for each model to ensure both contribute (default: 0.2)
         
         Returns:
@@ -577,14 +693,14 @@ class BGRUXGBoostEnsemble:
         self.logger.info("=" * 60)
         
         # Get predictions from both models
-        bgru_probs = self._get_bgru_predictions(val_df, batch_size)
-        xgb_probs = self._get_xgb_predictions(val_df)
+        bgru_preds = self._get_bgru_predictions(val_df, batch_size)
+        xgb_preds = self._get_xgb_predictions(val_df)
         
         # Both should now have the same length due to proper alignment
         # But take min_len just in case
-        min_len = min(len(bgru_probs), len(xgb_probs))
-        bgru_probs = bgru_probs[:min_len]
-        xgb_probs = xgb_probs[:min_len]
+        min_len = min(len(bgru_preds), len(xgb_preds))
+        bgru_preds = bgru_preds[:min_len]
+        xgb_preds = xgb_preds[:min_len]
         
         # Get aligned targets - BGRU outputs predictions for targets starting at 
         # index sequence_length - 1, with len(df) - sequence_length total predictions
@@ -592,104 +708,177 @@ class BGRUXGBoostEnsemble:
         targets = val_df['target'].values[self.sequence_length - 1:self.sequence_length - 1 + n_samples]
         targets = targets[:min_len]
         
-        # Log individual model performance
-        bgru_preds = (bgru_probs >= 0.5).astype(int)
-        xgb_preds = (xgb_probs >= 0.5).astype(int)
-        
-        bgru_acc = accuracy_score(targets, bgru_preds)
-        xgb_acc = accuracy_score(targets, xgb_preds)
-        bgru_f1 = f1_score(targets, bgru_preds, zero_division=0)
-        xgb_f1 = f1_score(targets, xgb_preds, zero_division=0)
-        bgru_recall = recall_score(targets, bgru_preds, zero_division=0)
-        xgb_recall = recall_score(targets, xgb_preds, zero_division=0)
-        
-        self.logger.info(f"BGRU - Accuracy: {bgru_acc:.4f}, F1: {bgru_f1:.4f}, Recall: {bgru_recall:.4f}")
-        self.logger.info(f"XGBoost - Accuracy: {xgb_acc:.4f}, F1: {xgb_f1:.4f}, Recall: {xgb_recall:.4f}")
-        
-        # Train stacking model with class weight balancing
-        self.logger.info("Training stacking model...")
-        stacked_features = np.column_stack([bgru_probs, xgb_probs])
-        self.stacking_model = LogisticRegression(
-            random_state=42, 
-            max_iter=1000,
-            class_weight='balanced'  # Handle class imbalance
-        )
-        self.stacking_model.fit(stacked_features, targets)
-        stacking_preds = self.stacking_model.predict(stacked_features)
-        stacking_acc = accuracy_score(targets, stacking_preds)
-        stacking_f1 = f1_score(targets, stacking_preds, zero_division=0)
-        stacking_recall = recall_score(targets, stacking_preds, zero_division=0)
-        self.logger.info(f"Stacking - Accuracy: {stacking_acc:.4f}, F1: {stacking_f1:.4f}, Recall: {stacking_recall:.4f}")
-        
-        # Optimize weighted average with minimum weight constraint
-        best_weights = [0.5, 0.5]  # Start with equal weights
-        best_score = 0.0
-        
-        def compute_score(preds, targets, metric):
-            if metric == 'accuracy':
-                return accuracy_score(targets, preds)
-            elif metric == 'f1':
-                return f1_score(targets, preds, zero_division=0)
-            elif metric == 'recall':
-                return recall_score(targets, preds, zero_division=0)
-            elif metric == 'balanced':
-                # Balance of F1 and recall
-                f1 = f1_score(targets, preds, zero_division=0)
-                rec = recall_score(targets, preds, zero_division=0)
-                return (f1 + rec) / 2
-            else:
-                return accuracy_score(targets, preds)
-        
-        if method == 'grid_search':
-            # Grid search over weight combinations with minimum weight constraint
-            self.logger.info(f"Optimizing for {optimize_for} with min_weight={min_weight}")
-            for w in np.arange(min_weight, 1.0 - min_weight + 0.01, 0.05):
-                weights = [w, 1 - w]
-                combined = weights[0] * bgru_probs + weights[1] * xgb_probs
-                preds = (combined >= 0.5).astype(int)
-                score = compute_score(preds, targets, optimize_for)
-                
-                if score > best_score:
-                    best_score = score
-                    best_weights = weights.copy()
+        if self.regression:
+            # Regression mode: optimize for RMSE (minimize)
+            # Log individual model performance
+            bgru_rmse = np.sqrt(mean_squared_error(targets, bgru_preds))
+            xgb_rmse = np.sqrt(mean_squared_error(targets, xgb_preds))
+            bgru_mae = mean_absolute_error(targets, bgru_preds)
+            xgb_mae = mean_absolute_error(targets, xgb_preds)
+            bgru_r2 = r2_score(targets, bgru_preds)
+            xgb_r2 = r2_score(targets, xgb_preds)
+            
+            self.logger.info(f"BGRU - RMSE: {bgru_rmse:.4f}, MAE: {bgru_mae:.4f}, R²: {bgru_r2:.4f}")
+            self.logger.info(f"XGBoost - RMSE: {xgb_rmse:.4f}, MAE: {xgb_mae:.4f}, R²: {xgb_r2:.4f}")
+            
+            # Train stacking model (Ridge regression for regression)
+            self.logger.info("Training stacking model (Ridge regression)...")
+            stacked_features = np.column_stack([bgru_preds, xgb_preds])
+            self.stacking_model = Ridge(alpha=1.0, random_state=42)
+            self.stacking_model.fit(stacked_features, targets)
+            stacking_preds = self.stacking_model.predict(stacked_features)
+            stacking_rmse = np.sqrt(mean_squared_error(targets, stacking_preds))
+            stacking_mae = mean_absolute_error(targets, stacking_preds)
+            stacking_r2 = r2_score(targets, stacking_preds)
+            self.logger.info(f"Stacking - RMSE: {stacking_rmse:.4f}, MAE: {stacking_mae:.4f}, R²: {stacking_r2:.4f}")
+            
+            # Optimize weighted average - minimize RMSE
+            best_weights = [0.5, 0.5]
+            best_rmse = float('inf')
+            
+            if method == 'grid_search':
+                self.logger.info(f"Optimizing for RMSE with min_weight={min_weight}")
+                for w in np.arange(min_weight, 1.0 - min_weight + 0.01, 0.05):
+                    weights = [w, 1 - w]
+                    combined = weights[0] * bgru_preds + weights[1] * xgb_preds
+                    rmse = np.sqrt(mean_squared_error(targets, combined))
                     
-        elif method == 'scipy':
-            # Scipy optimization with minimum weight constraint
-            def neg_score(w):
-                w_bgru = max(min_weight, min(1 - min_weight, w[0]))
-                w_xgb = 1 - w_bgru
-                combined = w_bgru * bgru_probs + w_xgb * xgb_probs
-                preds = (combined >= 0.5).astype(int)
-                return -compute_score(preds, targets, optimize_for)
+                    if rmse < best_rmse:
+                        best_rmse = rmse
+                        best_weights = weights.copy()
+                        
+            elif method == 'scipy':
+                def compute_rmse(w):
+                    w_bgru = max(min_weight, min(1 - min_weight, w[0]))
+                    w_xgb = 1 - w_bgru
+                    combined = w_bgru * bgru_preds + w_xgb * xgb_preds
+                    return np.sqrt(mean_squared_error(targets, combined))
+                
+                result = minimize(
+                    compute_rmse,
+                    x0=[0.5],
+                    bounds=[(min_weight, 1 - min_weight)],
+                    method='L-BFGS-B'
+                )
+                
+                best_weights = [result.x[0], 1 - result.x[0]]
+                best_rmse = result.fun
             
-            result = minimize(
-                neg_score,
-                x0=[0.5],
-                bounds=[(min_weight, 1 - min_weight)],
-                method='L-BFGS-B'
+            self.weights = best_weights
+            
+            # Calculate final metrics with best weights
+            final_combined = best_weights[0] * bgru_preds + best_weights[1] * xgb_preds
+            final_rmse = np.sqrt(mean_squared_error(targets, final_combined))
+            final_mae = mean_absolute_error(targets, final_combined)
+            final_r2 = r2_score(targets, final_combined)
+            
+            self.logger.info("-" * 60)
+            self.logger.info(f"Optimal weights: BGRU={best_weights[0]:.4f}, XGBoost={best_weights[1]:.4f}")
+            self.logger.info(f"Ensemble metrics (RMSE minimized):")
+            self.logger.info(f"  RMSE: {final_rmse:.4f}")
+            self.logger.info(f"  MAE: {final_mae:.4f}")
+            self.logger.info(f"  R²: {final_r2:.4f}")
+            self.logger.info("=" * 60)
+        else:
+            # Classification mode
+            # Log individual model performance
+            bgru_class_preds = (bgru_preds >= 0.5).astype(int)
+            xgb_class_preds = (xgb_preds >= 0.5).astype(int)
+            
+            bgru_acc = accuracy_score(targets, bgru_class_preds)
+            xgb_acc = accuracy_score(targets, xgb_class_preds)
+            bgru_f1 = f1_score(targets, bgru_class_preds, zero_division=0)
+            xgb_f1 = f1_score(targets, xgb_class_preds, zero_division=0)
+            bgru_recall = recall_score(targets, bgru_class_preds, zero_division=0)
+            xgb_recall = recall_score(targets, xgb_class_preds, zero_division=0)
+            
+            self.logger.info(f"BGRU - Accuracy: {bgru_acc:.4f}, F1: {bgru_f1:.4f}, Recall: {bgru_recall:.4f}")
+            self.logger.info(f"XGBoost - Accuracy: {xgb_acc:.4f}, F1: {xgb_f1:.4f}, Recall: {xgb_recall:.4f}")
+            
+            # Train stacking model with class weight balancing
+            self.logger.info("Training stacking model...")
+            stacked_features = np.column_stack([bgru_preds, xgb_preds])
+            self.stacking_model = LogisticRegression(
+                random_state=42, 
+                max_iter=1000,
+                class_weight='balanced'  # Handle class imbalance
             )
+            self.stacking_model.fit(stacked_features, targets)
+            stacking_preds = self.stacking_model.predict(stacked_features)
+            stacking_acc = accuracy_score(targets, stacking_preds)
+            stacking_f1 = f1_score(targets, stacking_preds, zero_division=0)
+            stacking_recall = recall_score(targets, stacking_preds, zero_division=0)
+            self.logger.info(f"Stacking - Accuracy: {stacking_acc:.4f}, F1: {stacking_f1:.4f}, Recall: {stacking_recall:.4f}")
             
-            best_weights = [result.x[0], 1 - result.x[0]]
-            best_score = -result.fun
-        
-        self.weights = best_weights
-        
-        # Calculate final metrics with best weights
-        final_combined = best_weights[0] * bgru_probs + best_weights[1] * xgb_probs
-        final_preds = (final_combined >= 0.5).astype(int)
-        final_acc = accuracy_score(targets, final_preds)
-        final_f1 = f1_score(targets, final_preds, zero_division=0)
-        final_recall = recall_score(targets, final_preds, zero_division=0)
-        final_precision = precision_score(targets, final_preds, zero_division=0)
-        
-        self.logger.info("-" * 60)
-        self.logger.info(f"Optimal weights: BGRU={best_weights[0]:.4f}, XGBoost={best_weights[1]:.4f}")
-        self.logger.info(f"Ensemble metrics ({optimize_for} optimized):")
-        self.logger.info(f"  Accuracy: {final_acc:.4f}")
-        self.logger.info(f"  F1-Score: {final_f1:.4f}")
-        self.logger.info(f"  Recall: {final_recall:.4f}")
-        self.logger.info(f"  Precision: {final_precision:.4f}")
-        self.logger.info("=" * 60)
+            # Optimize weighted average with minimum weight constraint
+            best_weights = [0.5, 0.5]  # Start with equal weights
+            best_score = 0.0
+            
+            def compute_score(preds, targets, metric):
+                if metric == 'accuracy':
+                    return accuracy_score(targets, preds)
+                elif metric == 'f1':
+                    return f1_score(targets, preds, zero_division=0)
+                elif metric == 'recall':
+                    return recall_score(targets, preds, zero_division=0)
+                elif metric == 'balanced':
+                    # Balance of F1 and recall
+                    f1 = f1_score(targets, preds, zero_division=0)
+                    rec = recall_score(targets, preds, zero_division=0)
+                    return (f1 + rec) / 2
+                else:
+                    return accuracy_score(targets, preds)
+            
+            if method == 'grid_search':
+                # Grid search over weight combinations with minimum weight constraint
+                self.logger.info(f"Optimizing for {optimize_for} with min_weight={min_weight}")
+                for w in np.arange(min_weight, 1.0 - min_weight + 0.01, 0.05):
+                    weights = [w, 1 - w]
+                    combined = weights[0] * bgru_preds + weights[1] * xgb_preds
+                    preds = (combined >= 0.5).astype(int)
+                    score = compute_score(preds, targets, optimize_for)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_weights = weights.copy()
+                        
+            elif method == 'scipy':
+                # Scipy optimization with minimum weight constraint
+                def neg_score(w):
+                    w_bgru = max(min_weight, min(1 - min_weight, w[0]))
+                    w_xgb = 1 - w_bgru
+                    combined = w_bgru * bgru_preds + w_xgb * xgb_preds
+                    preds = (combined >= 0.5).astype(int)
+                    return -compute_score(preds, targets, optimize_for)
+                
+                result = minimize(
+                    neg_score,
+                    x0=[0.5],
+                    bounds=[(min_weight, 1 - min_weight)],
+                    method='L-BFGS-B'
+                )
+                
+                best_weights = [result.x[0], 1 - result.x[0]]
+                best_score = -result.fun
+            
+            self.weights = best_weights
+            
+            # Calculate final metrics with best weights
+            final_combined = best_weights[0] * bgru_preds + best_weights[1] * xgb_preds
+            final_preds = (final_combined >= 0.5).astype(int)
+            final_acc = accuracy_score(targets, final_preds)
+            final_f1 = f1_score(targets, final_preds, zero_division=0)
+            final_recall = recall_score(targets, final_preds, zero_division=0)
+            final_precision = precision_score(targets, final_preds, zero_division=0)
+            
+            self.logger.info("-" * 60)
+            self.logger.info(f"Optimal weights: BGRU={best_weights[0]:.4f}, XGBoost={best_weights[1]:.4f}")
+            self.logger.info(f"Ensemble metrics ({optimize_for} optimized):")
+            self.logger.info(f"  Accuracy: {final_acc:.4f}")
+            self.logger.info(f"  F1-Score: {final_f1:.4f}")
+            self.logger.info(f"  Recall: {final_recall:.4f}")
+            self.logger.info(f"  Precision: {final_precision:.4f}")
+            self.logger.info("=" * 60)
         
         return best_weights
     
@@ -723,6 +912,7 @@ class BGRUXGBoostEnsemble:
             'bgru_model_path': self.bgru_model_path,
             'sequence_length': self.sequence_length,
             'n_features': len(self.feature_columns),
+            'regression': self.regression,
             'saved_at': datetime.now().isoformat()
         }
         
@@ -748,6 +938,7 @@ class BGRUXGBoostEnsemble:
         self.stacking_model = ensemble_data.get('stacking_model')
         self.weights = ensemble_data.get('weights', [0.6, 0.4])
         self.feature_columns = ensemble_data.get('feature_columns', get_all_features())
+        self.regression = ensemble_data.get('regression', False)
         
         # Update BGRU model path if different
         if 'bgru_model_path' in ensemble_data:
@@ -756,7 +947,8 @@ class BGRUXGBoostEnsemble:
                 self.bgru_model_path = new_bgru_path
                 self.bgru_model.load_model(new_bgru_path)
         
-        self.logger.info(f"Ensemble model loaded from {path}")
+        mode_str = "regression" if self.regression else "classification"
+        self.logger.info(f"Ensemble model loaded from {path} (mode: {mode_str})")
         self.logger.info(f"Weights: BGRU={self.weights[0]:.4f}, XGBoost={self.weights[1]:.4f}")
     
     def save_xgboost(
@@ -829,30 +1021,75 @@ class BGRUXGBoostEnsemble:
         targets = test_df['target'].values[self.sequence_length - 1:self.sequence_length - 1 + n_samples]
         targets = targets[:len(predictions)]
         
-        accuracy = accuracy_score(targets, predictions)
+        # Calculate individual model predictions
+        bgru_preds = self._get_bgru_predictions(test_df, batch_size)[:len(predictions)]
+        xgb_preds = self._get_xgb_predictions(test_df)[:len(predictions)]
         
-        # Calculate individual model accuracies
-        bgru_probs = self._get_bgru_predictions(test_df, batch_size)[:len(predictions)]
-        xgb_probs = self._get_xgb_predictions(test_df)[:len(predictions)]
-        
-        bgru_acc = accuracy_score(targets, (bgru_probs >= 0.5).astype(int))
-        xgb_acc = accuracy_score(targets, (xgb_probs >= 0.5).astype(int))
-        
-        metrics = {
-            'ensemble_accuracy': accuracy,
-            'bgru_accuracy': bgru_acc,
-            'xgb_accuracy': xgb_acc,
-            'ensemble_method': method,
-            'weights': self.weights
-        }
-        
-        self.logger.info("-" * 60)
-        self.logger.info(f"Evaluation Results ({method} method)")
-        self.logger.info("-" * 60)
-        self.logger.info(f"BGRU Accuracy: {bgru_acc:.4f}")
-        self.logger.info(f"XGBoost Accuracy: {xgb_acc:.4f}")
-        self.logger.info(f"Ensemble Accuracy: {accuracy:.4f}")
-        self.logger.info("-" * 60)
+        if self.regression:
+            # Regression metrics
+            ensemble_mse = mean_squared_error(targets, predictions)
+            ensemble_rmse = np.sqrt(ensemble_mse)
+            ensemble_mae = mean_absolute_error(targets, predictions)
+            ensemble_r2 = r2_score(targets, predictions)
+            
+            bgru_mse = mean_squared_error(targets, bgru_preds)
+            bgru_rmse = np.sqrt(bgru_mse)
+            bgru_mae = mean_absolute_error(targets, bgru_preds)
+            bgru_r2 = r2_score(targets, bgru_preds)
+            
+            xgb_mse = mean_squared_error(targets, xgb_preds)
+            xgb_rmse = np.sqrt(xgb_mse)
+            xgb_mae = mean_absolute_error(targets, xgb_preds)
+            xgb_r2 = r2_score(targets, xgb_preds)
+            
+            metrics = {
+                'ensemble_mse': ensemble_mse,
+                'ensemble_rmse': ensemble_rmse,
+                'ensemble_mae': ensemble_mae,
+                'ensemble_r2': ensemble_r2,
+                'bgru_mse': bgru_mse,
+                'bgru_rmse': bgru_rmse,
+                'bgru_mae': bgru_mae,
+                'bgru_r2': bgru_r2,
+                'xgb_mse': xgb_mse,
+                'xgb_rmse': xgb_rmse,
+                'xgb_mae': xgb_mae,
+                'xgb_r2': xgb_r2,
+                'ensemble_method': method,
+                'weights': self.weights,
+                'mode': 'regression'
+            }
+            
+            self.logger.info("-" * 60)
+            self.logger.info(f"Regression Evaluation Results ({method} method)")
+            self.logger.info("-" * 60)
+            self.logger.info(f"BGRU       - RMSE: {bgru_rmse:.4f}, MAE: {bgru_mae:.4f}, R²: {bgru_r2:.4f}")
+            self.logger.info(f"XGBoost    - RMSE: {xgb_rmse:.4f}, MAE: {xgb_mae:.4f}, R²: {xgb_r2:.4f}")
+            self.logger.info(f"Ensemble   - RMSE: {ensemble_rmse:.4f}, MAE: {ensemble_mae:.4f}, R²: {ensemble_r2:.4f}")
+            self.logger.info("-" * 60)
+        else:
+            # Classification metrics
+            accuracy = accuracy_score(targets, predictions)
+            
+            bgru_acc = accuracy_score(targets, (bgru_preds >= 0.5).astype(int))
+            xgb_acc = accuracy_score(targets, (xgb_preds >= 0.5).astype(int))
+            
+            metrics = {
+                'ensemble_accuracy': accuracy,
+                'bgru_accuracy': bgru_acc,
+                'xgb_accuracy': xgb_acc,
+                'ensemble_method': method,
+                'weights': self.weights,
+                'mode': 'classification'
+            }
+            
+            self.logger.info("-" * 60)
+            self.logger.info(f"Classification Evaluation Results ({method} method)")
+            self.logger.info("-" * 60)
+            self.logger.info(f"BGRU Accuracy: {bgru_acc:.4f}")
+            self.logger.info(f"XGBoost Accuracy: {xgb_acc:.4f}")
+            self.logger.info(f"Ensemble Accuracy: {accuracy:.4f}")
+            self.logger.info("-" * 60)
         
         return metrics
 
@@ -938,6 +1175,11 @@ def main():
         default=None,
         help='Path to selected features text file (from feature selection)'
     )
+    parser.add_argument(
+        '--regression',
+        action='store_true',
+        help='Use regression mode (predict continuous values) instead of classification'
+    )
     
     args = parser.parse_args()
     
@@ -978,8 +1220,12 @@ def main():
         bgru_model_path=args.bgru_model,
         sequence_length=args.sequence_length,
         hyperparams_path=hyperparams_path,
-        selected_features_path=selected_features_path
+        selected_features_path=selected_features_path,
+        regression=args.regression
     )
+    
+    mode_str = "regression" if args.regression else "classification"
+    logger.info(f"Mode: {mode_str}")
     
     if args.train:
         # Load training and validation data

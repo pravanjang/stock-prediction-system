@@ -1,31 +1,17 @@
 ======================================================================
 BGRU BASELINE MODEL EVALUATION REPORT
 ======================================================================
-Generated: 2025-11-30 18:15:51
+Generated: 2025-12-01 18:21:30
 
 ----------------------------------------------------------------------
-CLASSIFICATION METRICS
+REGRESSION METRICS
 ----------------------------------------------------------------------
 Total Samples:      621
-Correct Predictions: 434
-Incorrect Predictions: 187
 
-Accuracy:           0.6989 (69.89%)
-Precision:          0.0000
-Recall:             0.0000
-F1-Score:           0.0000
-ROC-AUC:            0.5000
-Specificity:        1.0000
-
-Confusion Matrix:
-  True Negatives:   434
-  False Positives:  0
-  False Negatives:  187
-  True Positives:   0
-
-Class Distribution:
-  Ground Truth: {0: 434, 1: 187}
-  Predictions:  {0: 621}
+MSE:                1007263722.2904
+RMSE:               31737.4183
+MAE:                31432.1968
+R2 Score:           -51.6306
 
 ----------------------------------------------------------------------
 TRADING SIMULATION RESULTS
@@ -49,19 +35,18 @@ Worst Trade:        ₹-32,312.36
 ----------------------------------------------------------------------
 SUCCESS CRITERIA CHECK
 ----------------------------------------------------------------------
-Test Accuracy > 53%:        PASS ✓ (69.89%)
-Precision > 50%:            FAIL ✗ (0.00%)
-Recall > 50%:               FAIL ✗ (0.00%)
-Train-Val Gap < 5%:         PASS ✓ (0.87%)
-  (Train Acc: 68.99%, Val Acc: 68.12%)
+MSE:                1007263722.2904
+RMSE:               31737.4183
+MAE:                31432.1968
+R2 Score:           -51.6306
+Train-Val RMSE Gap < 10%:    FAIL ✗ (590.77%)
+  (Train RMSE: 3259.0884, Val RMSE: 22512.7489)
 
 ----------------------------------------------------------------------
 OVERALL ASSESSMENT
 ----------------------------------------------------------------------
-Status: BASELINE NOT MET ✗
-The model does not meet all baseline requirements.
-Consider:
-  - Adjusting class weights or decision threshold
+Status: REGRESSION EVALUATION COMPLETED
+Note: Regression models do not have fixed 'baseline' thresholds in this report. Review MSE/RMSE/MAE/R2 metrics for model quality.
 
 ======================================================================
 END OF REPORT

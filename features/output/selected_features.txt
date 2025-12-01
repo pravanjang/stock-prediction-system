@@ -1,4 +1,4 @@
-returns
+target_pct_change
 stoch_d
 adx_14
 momentum_10

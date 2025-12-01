@@ -27,6 +27,9 @@ from sklearn.metrics import (
     confusion_matrix,
     roc_auc_score,
     classification_report,
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
 )
 
 # Add parent directory to path for imports
@@ -45,7 +48,8 @@ logger = logging.getLogger(__name__)
 def load_model_and_data(
     model_path: str,
     test_data_path: str,
-    sequence_length: int = 60
+    sequence_length: int = 60,
+    force_regression: Optional[bool] = None
 ) -> Tuple[BGRUPredictor, pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
     """
     Load the trained model and test data.
@@ -63,6 +67,11 @@ def load_model_and_data(
     # Initialize predictor and load model
     predictor = BGRUPredictor()
     predictor.load_model(model_path)
+    # If CLI forces regression vs classification, override predictor flag
+    if force_regression is not None:
+        predictor.regression = bool(force_regression)
+        if hasattr(predictor.model, 'regression'):
+            predictor.model.regression = predictor.regression
     
     logger.info(f"Loading test data from {test_data_path}")
     test_df = pd.read_csv(test_data_path, index_col=0, parse_dates=True)
@@ -79,7 +88,11 @@ def load_model_and_data(
     
     # Ensure alignment
     min_len = min(len(y_true), len(y_pred))
-    y_true = y_true[:min_len].astype(int)
+    # For regression mode, keep y_true as float; for classification cast to int
+    if getattr(predictor, 'regression', False):
+        y_true = y_true[:min_len].astype(float)
+    else:
+        y_true = y_true[:min_len].astype(int)
     y_pred = y_pred[:min_len]
     y_pred_proba = y_pred_proba[:min_len]
     
@@ -105,7 +118,6 @@ def calculate_metrics(
         Dictionary containing all calculated metrics
     """
     metrics = {}
-    
     # Basic classification metrics
     metrics['accuracy'] = float(accuracy_score(y_true, y_pred))
     metrics['precision'] = float(precision_score(y_true, y_pred, zero_division=0))
@@ -151,6 +163,33 @@ def calculate_metrics(
     logger.info(f"F1-Score: {metrics['f1_score']:.4f}")
     logger.info(f"ROC-AUC: {metrics['roc_auc']:.4f}")
     
+    return metrics
+
+
+def calculate_regression_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray
+) -> Dict[str, float]:
+    """
+    Calculate regression evaluation metrics (MSE, RMSE, MAE, R2).
+    """
+    metrics = {}
+    # Flatten to 1D arrays
+    y_true = np.asarray(y_true).astype(float).flatten()
+    y_pred = np.asarray(y_pred).astype(float).flatten()
+    # Basic metrics
+    mse = float(mean_squared_error(y_true, y_pred))
+    rmse = float(np.sqrt(mse))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    r2 = float(r2_score(y_true, y_pred))
+
+    metrics['mse'] = mse
+    metrics['rmse'] = rmse
+    metrics['mae'] = mae
+    metrics['r2'] = r2
+    metrics['total_samples'] = int(len(y_true))
+
+    logger.info(f"Regression MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, R2: {r2:.4f}")
     return metrics
 
 
@@ -255,9 +294,65 @@ def plot_prediction_confidence(
     logger.info(f"Prediction confidence plot saved to {save_path}")
 
 
+def plot_regression_predictions(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    df: pd.DataFrame,
+    save_path: str,
+    sequence_length: int = 60
+) -> None:
+    """
+    Plot regression results including predicted vs actual, residuals, and timeseries overlay.
+    """
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Scatter: Predicted vs Actual with identity line
+    axes[0, 0].scatter(y_true, y_pred, s=8, alpha=0.6)
+    minv = min(y_true.min(), y_pred.min())
+    maxv = max(y_true.max(), y_pred.max())
+    axes[0, 0].plot([minv, maxv], [minv, maxv], 'r--')
+    axes[0, 0].set_title('Predicted vs Actual')
+    axes[0, 0].set_xlabel('Actual')
+    axes[0, 0].set_ylabel('Predicted')
+    axes[0, 0].grid(True)
+
+    # Residual histogram
+    residuals = y_pred - y_true
+    axes[0, 1].hist(residuals, bins=50, color='gray', edgecolor='black')
+    axes[0, 1].set_title('Residuals (Predicted - Actual)')
+    axes[0, 1].set_xlabel('Residual')
+    axes[0, 1].grid(True)
+
+    # Time series overlay (subset to avoid large plots)
+    ts_len = min(len(y_true), 200)
+    t = np.arange(ts_len)
+    axes[1, 0].plot(t, y_true[:ts_len], label='Actual')
+    axes[1, 0].plot(t, y_pred[:ts_len], label='Predicted')
+    axes[1, 0].set_title('Time Series: Actual vs Predicted (sample)')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True)
+
+    # Scatter over time: predicted - actual
+    axes[1, 1].plot(t, residuals[:ts_len], label='Residual')
+    axes[1, 1].axhline(0, color='black', linestyle='--')
+    axes[1, 1].set_title('Residuals over time (sample)')
+    axes[1, 1].grid(True)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    logger.info(f"Regression plots saved to {save_path}")
+
+
 def simulate_trading(
     df: pd.DataFrame,
     predictions: np.ndarray,
+    regression: bool = False,
     sequence_length: int = 60,
     transaction_cost: float = 0.0003,
     lot_size: int = 15,  # BankNifty lot size
@@ -307,9 +402,22 @@ def simulate_trading(
         entry_price = df.iloc[data_idx]['close']
         exit_price = df.iloc[data_idx + 1]['close']
         prediction = predictions[i]
+
+        # Determine trading signal. For regression, predictions are continuous
+        # predicted next_close > entry_price => LONG, else SHORT
+        if regression:
+            try:
+                # cast prediction to float
+                pred_val = float(prediction)
+                signal_val = 1 if pred_val > float(entry_price) else 0
+            except Exception:
+                signal_val = int(prediction)
+        else:
+            # classification predictions are expected as 0/1 labels
+            signal_val = int(prediction)
         
         # Calculate raw PnL (per unit)
-        if prediction == 1:  # LONG
+        if signal_val == 1:  # LONG
             raw_pnl = exit_price - entry_price
             direction = 'LONG'
         else:  # SHORT
@@ -397,7 +505,8 @@ def generate_report(
     metrics: Dict,
     trading_results: Dict,
     training_history_path: Optional[str] = None,
-    save_path: str = 'evaluation/reports/baseline_report.txt'
+    save_path: str = 'evaluation/reports/baseline_report.txt',
+    is_regression: bool = False
 ) -> str:
     """
     Generate a comprehensive text report of the evaluation.
@@ -433,35 +542,45 @@ def generate_report(
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
     
-    # Classification Metrics Section
+    # Metrics Section (classification or regression)
     lines.append("-" * 70)
-    lines.append("CLASSIFICATION METRICS")
-    lines.append("-" * 70)
-    lines.append(f"Total Samples:      {metrics.get('total_samples', 'N/A')}")
-    lines.append(f"Correct Predictions: {metrics.get('correct_predictions', 'N/A')}")
-    lines.append(f"Incorrect Predictions: {metrics.get('incorrect_predictions', 'N/A')}")
-    lines.append("")
-    lines.append(f"Accuracy:           {metrics.get('accuracy', 0):.4f} ({metrics.get('accuracy', 0)*100:.2f}%)")
-    lines.append(f"Precision:          {metrics.get('precision', 0):.4f}")
-    lines.append(f"Recall:             {metrics.get('recall', 0):.4f}")
-    lines.append(f"F1-Score:           {metrics.get('f1_score', 0):.4f}")
-    lines.append(f"ROC-AUC:            {metrics.get('roc_auc', 0):.4f}")
-    lines.append(f"Specificity:        {metrics.get('specificity', 0):.4f}")
+    if not is_regression:
+        lines.append("CLASSIFICATION METRICS")
+        lines.append("-" * 70)
+        lines.append(f"Total Samples:      {metrics.get('total_samples', 'N/A')}")
+        lines.append(f"Correct Predictions: {metrics.get('correct_predictions', 'N/A')}")
+        lines.append(f"Incorrect Predictions: {metrics.get('incorrect_predictions', 'N/A')}")
+        lines.append("")
+        lines.append(f"Accuracy:           {metrics.get('accuracy', 0):.4f} ({metrics.get('accuracy', 0)*100:.2f}%)")
+        lines.append(f"Precision:          {metrics.get('precision', 0):.4f}")
+        lines.append(f"Recall:             {metrics.get('recall', 0):.4f}")
+        lines.append(f"F1-Score:           {metrics.get('f1_score', 0):.4f}")
+        lines.append(f"ROC-AUC:            {metrics.get('roc_auc', 0):.4f}")
+        lines.append(f"Specificity:        {metrics.get('specificity', 0):.4f}")
+    else:
+        lines.append("REGRESSION METRICS")
+        lines.append("-" * 70)
+        lines.append(f"Total Samples:      {metrics.get('total_samples', 'N/A')}")
+        lines.append("")
+        lines.append(f"MSE:                {metrics.get('mse', 0):.4f}")
+        lines.append(f"RMSE:               {metrics.get('rmse', 0):.4f}")
+        lines.append(f"MAE:                {metrics.get('mae', 0):.4f}")
+        lines.append(f"R2 Score:           {metrics.get('r2', 0):.4f}")
     lines.append("")
     
-    # Confusion Matrix
-    lines.append("Confusion Matrix:")
-    lines.append(f"  True Negatives:   {metrics.get('true_negatives', 'N/A')}")
-    lines.append(f"  False Positives:  {metrics.get('false_positives', 'N/A')}")
-    lines.append(f"  False Negatives:  {metrics.get('false_negatives', 'N/A')}")
-    lines.append(f"  True Positives:   {metrics.get('true_positives', 'N/A')}")
-    lines.append("")
-    
-    # Class Distribution
-    lines.append("Class Distribution:")
-    lines.append(f"  Ground Truth: {metrics.get('ground_truth_distribution', {})}")
-    lines.append(f"  Predictions:  {metrics.get('prediction_distribution', {})}")
-    lines.append("")
+    if not is_regression:
+        # Confusion Matrix
+        lines.append("Confusion Matrix:")
+        lines.append(f"  True Negatives:   {metrics.get('true_negatives', 'N/A')}")
+        lines.append(f"  False Positives:  {metrics.get('false_positives', 'N/A')}")
+        lines.append(f"  False Negatives:  {metrics.get('false_negatives', 'N/A')}")
+        lines.append(f"  True Positives:   {metrics.get('true_positives', 'N/A')}")
+        lines.append("")
+        # Class Distribution
+        lines.append("Class Distribution:")
+        lines.append(f"  Ground Truth: {metrics.get('ground_truth_distribution', {})}")
+        lines.append(f"  Predictions:  {metrics.get('prediction_distribution', {})}")
+        lines.append("")
     
     # Trading Simulation Section
     lines.append("-" * 70)
@@ -489,47 +608,85 @@ def generate_report(
     lines.append("SUCCESS CRITERIA CHECK")
     lines.append("-" * 70)
     
-    # Accuracy check
-    accuracy = metrics.get('accuracy', 0)
-    acc_pass = accuracy > 0.53
-    lines.append(f"Test Accuracy > 53%:        {'PASS ✓' if acc_pass else 'FAIL ✗'} ({accuracy*100:.2f}%)")
-    
-    # Precision check
-    precision = metrics.get('precision', 0)
-    prec_pass = precision > 0.50
-    lines.append(f"Precision > 50%:            {'PASS ✓' if prec_pass else 'FAIL ✗'} ({precision*100:.2f}%)")
-    
-    # Recall check
-    recall = metrics.get('recall', 0)
-    rec_pass = recall > 0.50
-    lines.append(f"Recall > 50%:               {'PASS ✓' if rec_pass else 'FAIL ✗'} ({recall*100:.2f}%)")
+    if not is_regression:
+        # Accuracy check
+        accuracy = metrics.get('accuracy', 0)
+        acc_pass = accuracy > 0.53
+        lines.append(f"Test Accuracy > 53%:        {'PASS ✓' if acc_pass else 'FAIL ✗'} ({accuracy*100:.2f}%)")
+
+        # Precision check
+        precision = metrics.get('precision', 0)
+        prec_pass = precision > 0.50
+        lines.append(f"Precision > 50%:            {'PASS ✓' if prec_pass else 'FAIL ✗'} ({precision*100:.2f}%)")
+
+        # Recall check
+        recall = metrics.get('recall', 0)
+        rec_pass = recall > 0.50
+        lines.append(f"Recall > 50%:               {'PASS ✓' if rec_pass else 'FAIL ✗'} ({recall*100:.2f}%)")
+    else:
+        # Regression metrics: show RMSE/MAE and R2; no hard pass thresholds by default
+        rmse = metrics.get('rmse', 0)
+        mae = metrics.get('mae', 0)
+        r2 = metrics.get('r2', 0)
+        lines.append(f"MSE:                {metrics.get('mse', 0):.4f}")
+        lines.append(f"RMSE:               {rmse:.4f}")
+        lines.append(f"MAE:                {mae:.4f}")
+        lines.append(f"R2 Score:           {r2:.4f}")
     
     # Overfitting check
-    if train_acc is not None and val_acc is not None:
-        gap = abs(train_acc - val_acc) * 100
-        overfit_pass = gap < 5.0
-        lines.append(f"Train-Val Gap < 5%:         {'PASS ✓' if overfit_pass else 'FAIL ✗'} ({gap:.2f}%)")
-        lines.append(f"  (Train Acc: {train_acc*100:.2f}%, Val Acc: {val_acc*100:.2f}%)")
+    if not is_regression:
+        if train_acc is not None and val_acc is not None:
+            gap = abs(train_acc - val_acc) * 100
+            overfit_pass = gap < 5.0
+            lines.append(f"Train-Val Gap < 5%:         {'PASS ✓' if overfit_pass else 'FAIL ✗'} ({gap:.2f}%)")
+            lines.append(f"  (Train Acc: {train_acc*100:.2f}%, Val Acc: {val_acc*100:.2f}%)")
+        else:
+            lines.append("Train-Val Gap < 5%:         N/A (training history not found)")
     else:
-        lines.append("Train-Val Gap < 5%:         N/A (training history not found)")
+        # Regression: compare RMSE from training history if available
+        train_rmse = None
+        val_rmse = None
+        if training_history_path and os.path.exists(training_history_path):
+            try:
+                with open(training_history_path, 'r') as f:
+                    history = json.load(f)
+                if 'train_rmse' in history and history['train_rmse']:
+                    train_rmse = history['train_rmse'][-1]
+                if 'val_rmse' in history and history['val_rmse']:
+                    val_rmse = history['val_rmse'][-1]
+            except Exception:
+                pass
+
+        if train_rmse is not None and val_rmse is not None:
+            # gap as relative percent difference
+            gap = abs(train_rmse - val_rmse) / max(train_rmse, 1e-8) * 100
+            overfit_pass = gap < 10.0
+            lines.append(f"Train-Val RMSE Gap < 10%:    {'PASS ✓' if overfit_pass else 'FAIL ✗'} ({gap:.2f}%)")
+            lines.append(f"  (Train RMSE: {train_rmse:.4f}, Val RMSE: {val_rmse:.4f})")
+        else:
+            lines.append("Train-Val RMSE Gap < 10%:    N/A (training history not found)")
     
     lines.append("")
     lines.append("-" * 70)
     lines.append("OVERALL ASSESSMENT")
     lines.append("-" * 70)
     
-    all_pass = acc_pass and prec_pass and rec_pass
-    if all_pass:
-        lines.append("Status: BASELINE ACHIEVED ✓")
-        lines.append("The model meets minimum baseline requirements for Phase 1.")
+    if not is_regression:
+        all_pass = acc_pass and prec_pass and rec_pass
+        if all_pass:
+            lines.append("Status: BASELINE ACHIEVED ✓")
+            lines.append("The model meets minimum baseline requirements for Phase 1.")
+        else:
+            lines.append("Status: BASELINE NOT MET ✗")
+            lines.append("The model does not meet all baseline requirements.")
+            lines.append("Consider:")
+            if not acc_pass:
+                lines.append("  - Increasing training epochs or adjusting learning rate")
+            if not prec_pass or not rec_pass:
+                lines.append("  - Adjusting class weights or decision threshold")
     else:
-        lines.append("Status: BASELINE NOT MET ✗")
-        lines.append("The model does not meet all baseline requirements.")
-        lines.append("Consider:")
-        if not acc_pass:
-            lines.append("  - Increasing training epochs or adjusting learning rate")
-        if not prec_pass or not rec_pass:
-            lines.append("  - Adjusting class weights or decision threshold")
+        lines.append("Status: REGRESSION EVALUATION COMPLETED")
+        lines.append("Note: Regression models do not have fixed 'baseline' thresholds in this report. Review MSE/RMSE/MAE/R2 metrics for model quality.")
     
     lines.append("")
     lines.append("=" * 70)
@@ -588,6 +745,11 @@ def main():
         default=0.0003,
         help='Transaction cost per trade (default: 0.03%%)'
     )
+    parser.add_argument(
+        '--regression',
+        action='store_true',
+        help='Evaluate in regression mode (next day close predictions)'
+    )
     
     args = parser.parse_args()
     
@@ -614,28 +776,33 @@ def main():
     predictor, test_df, y_true, y_pred, y_pred_proba = load_model_and_data(
         model_path=args.model,
         test_data_path=args.data,
-        sequence_length=args.sequence_length
+        sequence_length=args.sequence_length,
+        force_regression=args.regression if args.regression else None
     )
     
-    # Calculate metrics
     logger.info("-" * 60)
-    logger.info("Calculating classification metrics...")
-    metrics = calculate_metrics(y_true, y_pred, y_pred_proba)
-    
-    # Plot confusion matrix
-    logger.info("-" * 60)
-    logger.info("Generating plots...")
-    plot_confusion_matrix(
-        y_true, y_pred,
-        save_path=os.path.join(plots_dir, 'confusion_matrix.png')
-    )
-    
-    # Plot prediction confidence
-    plot_prediction_confidence(
-        y_pred_proba,
-        save_path=os.path.join(plots_dir, 'prediction_confidence.png'),
-        y_true=y_true
-    )
+    logger.info("Generating metrics and plots...")
+    if predictor.regression:
+        metrics = calculate_regression_metrics(y_true, y_pred)
+        # Regression-specific plots
+        plot_regression_predictions(
+            y_true, y_pred, test_df,
+            save_path=os.path.join(plots_dir, 'regression_plots.png'),
+            sequence_length=args.sequence_length
+        )
+    else:
+        metrics = calculate_metrics(y_true, y_pred, y_pred_proba)
+        # Plot confusion matrix
+        plot_confusion_matrix(
+            y_true, y_pred,
+            save_path=os.path.join(plots_dir, 'confusion_matrix.png')
+        )
+        # Plot prediction confidence
+        plot_prediction_confidence(
+            y_pred_proba,
+            save_path=os.path.join(plots_dir, 'prediction_confidence.png'),
+            y_true=y_true
+        )
     
     # Run trading simulation
     logger.info("-" * 60)
@@ -643,6 +810,7 @@ def main():
     trading_results = simulate_trading(
         df=test_df,
         predictions=y_pred,
+        regression=predictor.regression,
         sequence_length=args.sequence_length,
         transaction_cost=args.transaction_cost
     )
@@ -653,12 +821,13 @@ def main():
         metrics=metrics,
         trading_results=trading_results,
         training_history_path=args.training_history,
-        save_path=os.path.join(reports_dir, 'baseline_report.txt')
+        save_path=os.path.join(reports_dir, 'baseline_report.txt'),
+        is_regression=predictor.regression
     )
     
     # Save metrics as JSON
     all_results = {
-        'classification_metrics': metrics,
+        'regression_metrics' if predictor.regression else 'classification_metrics': metrics,
         'trading_results': trading_results,
         'evaluation_config': {
             'model_path': args.model,

@@ -1,104 +1,30 @@
 {
-  "classification_metrics": {
-    "accuracy": 0.3042121684867395,
-    "precision": 0.303125,
-    "recall": 1.0,
-    "f1_score": 0.46522781774580335,
-    "roc_auc": 0.49851241956687187,
-    "true_negatives": 1,
-    "false_positives": 446,
-    "false_negatives": 0,
-    "true_positives": 194,
-    "specificity": 0.0022371364653243847,
-    "class_0_precision": 1.0,
-    "class_0_recall": 0.0022371364653243847,
-    "class_0_f1": 0.004464285714285714,
-    "class_1_precision": 0.303125,
-    "class_1_recall": 1.0,
-    "class_1_f1": 0.46522781774580335,
-    "prediction_distribution": {
-      "0": 1,
-      "1": 640
-    },
-    "ground_truth_distribution": {
-      "0": 447,
-      "1": 194
-    },
-    "total_samples": 641,
-    "correct_predictions": 195,
-    "incorrect_predictions": 446,
-    "optimal_threshold": 0.40000000000000013,
-    "default_threshold": 0.5,
-    "threshold_optimization": {
-      "f1_optimal": {
-        "threshold": 0.43000000000000016,
-        "metrics": {
-          "threshold": 0.43000000000000016,
-          "precision": 0.30393700787401573,
-          "recall": 0.9948453608247423,
-          "f1": 0.46562123039806996,
-          "accuracy": 0.3088923556942278,
-          "specificity": 0.011185682326621925,
-          "balanced_accuracy": 0.5030155215756821,
-          "youden_j": 0.006031043151364157
-        }
-      },
-      "recall_optimal": {
-        "threshold": 0.40000000000000013,
-        "metrics": {
-          "threshold": 0.40000000000000013,
-          "precision": 0.303125,
-          "recall": 1.0,
-          "f1": 0.46522781774580335,
-          "accuracy": 0.3042121684867395,
-          "specificity": 0.0022371364653243847,
-          "balanced_accuracy": 0.5011185682326622,
-          "youden_j": 0.0022371364653244186
-        }
-      },
-      "target_55_recall": {
-        "threshold": 0.5703117668628693,
-        "metrics": {
-          "threshold": 0.5703117668628693,
-          "precision": 0.29395604395604397,
-          "recall": 0.5515463917525774,
-          "f1": 0.3835125402669544,
-          "note": "Could not meet both targets, optimized for recall"
-        }
-      }
-    }
-  },
-  "backtesting_results": {
-    "total_trades": 641,
-    "winning_trades": 320,
-    "losing_trades": 321,
-    "long_trades": 640,
-    "short_trades": 1,
-    "total_return": -3.362696360043924,
-    "annualized_return": -7.7514921459491015,
-    "total_pnl": -93801.67264999992,
-    "win_rate": 49.921996879875195,
-    "avg_profit_per_winning_trade": 11048.812507031253,
-    "avg_loss_per_losing_trade": -11306.60957912773,
-    "profit_factor": 0.9741552012821479,
-    "max_drawdown": 368674.5121500001,
-    "max_drawdown_pct": 578.8538058192182,
-    "sharpe_ratio": -0.22275044337637687,
-    "sortino_ratio": -0.29537473703050765,
-    "avg_trade_pnl": -146.3364627925116,
-    "avg_trade_return": -0.005246016162314999,
-    "std_trade_return": 0.9164862854717704,
-    "best_trade": 73424.4994,
-    "worst_trade": -142867.82894999994,
-    "avg_holding_time": 1,
-    "trades_csv_path": "evaluation\\reports\\backtest_trades.csv"
+  "regression_metrics": {
+    "mse": 58248573.63483103,
+    "rmse": 7632.075316375686,
+    "mae": 7285.160533917075,
+    "r2": -2.043561901980002,
+    "mape": 14.36978822546447,
+    "smape": 15.572563171447056,
+    "directional_accuracy": 0.5403225806451613,
+    "mean_error": -7285.160533917075,
+    "std_error": 2274.8647498012074,
+    "max_overpredict": -2059.3472656250087,
+    "max_underpredict": -13744.269765625002,
+    "median_abs_error": 6936.93445312501,
+    "p90_abs_error": 10534.689218750013,
+    "p95_abs_error": 11262.423203125014,
+    "total_samples": 621,
+    "target_mean": 50186.90821256039,
+    "target_std": 4374.733259458688,
+    "prediction_mean": 42901.74767864331,
+    "prediction_std": 3365.694342577891
   },
   "evaluation_config": {
     "model_path": "models/checkpoints/ensemble_model.pkl",
     "data_path": "data/processed/test_final.csv",
-    "sequence_length": 40,
-    "lot_size": 35,
-    "transaction_cost": 0.0003,
-    "evaluated_at": "2025-11-30T18:56:39.999689"
+    "sequence_length": 60,
+    "mode": "regression",
+    "evaluated_at": "2025-12-01T19:02:23.887657"
   }
 }

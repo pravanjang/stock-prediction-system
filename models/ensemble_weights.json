@@ -1,6 +1,6 @@
 {
-  "bgru_weight": 0.2,
-  "xgb_weight": 0.8,
+  "bgru_weight": 0.7999999999999998,
+  "xgb_weight": 0.20000000000000018,
   "stacking_trained": true,
-  "saved_at": "2025-11-30T18:54:27.749681"
+  "saved_at": "2025-12-01T18:54:32.544932"
 }

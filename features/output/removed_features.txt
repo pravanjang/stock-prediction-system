@@ -1,6 +1,6 @@
 open
 high
-low
+close
 ema_9
 ema_21
 sma_20
@@ -10,9 +10,7 @@ bb_width
 rsi_bullish_divergence
 ema_50
 bb_lower
-volatility
-close
-return_1
+low
 rsi_21
 macd
 volume

@@ -157,9 +157,10 @@ def apply_class_balancing(train_df: pd.DataFrame) -> Optional[torch.Tensor]:
 
 def setup_optuna_study(
     study_name: str = "bgru_optimization",
-    direction: str = "maximize",
+    direction: Optional[str] = None,
     storage: Optional[str] = None,
-    load_if_exists: bool = True
+    load_if_exists: bool = True,
+    regression: bool = False
 ) -> optuna.Study:
     """
     Setup Optuna study for Bayesian optimization.
@@ -184,6 +185,10 @@ def setup_optuna_study(
     # Create sampler for Bayesian optimization (TPE)
     sampler = optuna.samplers.TPESampler(seed=42)
     
+    # Default direction: minimize for regression (RMSE), maximize for classification (accuracy)
+    if direction is None:
+        direction = 'minimize' if regression else 'maximize'
+
     study = optuna.create_study(
         study_name=study_name,
         direction=direction,
@@ -218,6 +223,8 @@ class OptunaObjective:
         sequence_length: int = 60,
         epochs: int = 20,
         device: Optional[str] = None
+        ,
+        regression: bool = False
     ):
         """
         Initialize the objective function.
@@ -237,6 +244,7 @@ class OptunaObjective:
         self.class_weights = class_weights
         self.sequence_length = sequence_length
         self.epochs = epochs
+        self.regression = regression
         
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -315,30 +323,33 @@ class OptunaObjective:
                 val_dataset, batch_size=batch_size, shuffle=False
             )
             
-            # Setup loss function
-            if self.class_weights is not None:
-                class_weights_device = self.class_weights.to(self.device)
-                class_0_weight = torch.clamp(class_weights_device[0], min=MIN_STD)
-                # Compute relative weight for class 1 samples
-                class_1_relative_weight = class_weights_device[1] / class_0_weight
-                
-                def weighted_bce_loss(
-                    outputs: torch.Tensor,
-                    targets: torch.Tensor,
-                    pos_weight: torch.Tensor = class_1_relative_weight
-                ) -> torch.Tensor:
-                    # Use where for efficient weight computation
-                    sample_weights = torch.where(
-                        targets == 1,
-                        pos_weight,
-                        torch.ones(1, device=targets.device, dtype=targets.dtype)
-                    )
-                    bce = nn.functional.binary_cross_entropy(outputs, targets, reduction='none')
-                    return (bce * sample_weights).mean()
-                
-                criterion = weighted_bce_loss
+            # Setup loss function (classification or regression)
+            if not self.regression:
+                if self.class_weights is not None:
+                    class_weights_device = self.class_weights.to(self.device)
+                    class_0_weight = torch.clamp(class_weights_device[0], min=MIN_STD)
+                    # Compute relative weight for class 1 samples
+                    class_1_relative_weight = class_weights_device[1] / class_0_weight
+
+                    def weighted_bce_loss(
+                        outputs: torch.Tensor,
+                        targets: torch.Tensor,
+                        pos_weight: torch.Tensor = class_1_relative_weight
+                    ) -> torch.Tensor:
+                        # Use where for efficient weight computation
+                        sample_weights = torch.where(
+                            targets == 1,
+                            pos_weight,
+                            torch.ones(1, device=targets.device, dtype=targets.dtype)
+                        )
+                        bce = nn.functional.binary_cross_entropy(outputs, targets, reduction='none')
+                        return (bce * sample_weights).mean()
+
+                    criterion = weighted_bce_loss
+                else:
+                    criterion = nn.BCELoss()
             else:
-                criterion = nn.BCELoss()
+                criterion = nn.MSELoss()
             
             # Setup optimizer
             optimizer = torch.optim.Adam(
@@ -349,6 +360,7 @@ class OptunaObjective:
             
             # Training loop
             best_val_acc = 0.0
+            best_val_rmse = float('inf')
             model = predictor.model
             
             for epoch in range(self.epochs):
@@ -366,27 +378,48 @@ class OptunaObjective:
                 model.eval()
                 val_correct = 0
                 val_total = 0
+                val_loss_accum = 0.0
                 
                 with torch.no_grad():
                     for batch_X, batch_y in val_loader:
                         outputs = model(batch_X)
-                        predictions = (outputs >= 0.5).float()
-                        val_correct += (predictions == batch_y).sum().item()
-                        val_total += batch_y.size(0)
+                        if self.regression:
+                            loss_val = nn.functional.mse_loss(outputs, batch_y)
+                            val_loss_accum += loss_val.item() * batch_y.size(0)
+                            val_total += batch_y.size(0)
+                        else:
+                            predictions = (outputs >= 0.5).float()
+                            val_correct += (predictions == batch_y).sum().item()
+                            val_total += batch_y.size(0)
                 
-                val_acc = val_correct / val_total
-                best_val_acc = max(best_val_acc, val_acc)
+                if self.regression:
+                    # compute RMSE over validation set
+                    val_mse = val_loss_accum / val_total if val_total > 0 else float('inf')
+                    val_rmse = float(np.sqrt(val_mse))
+                    best_val_rmse = min(best_val_rmse, val_rmse)
+                    # Report rmse (smaller is better)
+                    trial.report(val_rmse, epoch)
+                    val_metric_for_pruning = val_rmse
+                else:
+                    val_acc = val_correct / val_total
+                    best_val_acc = max(best_val_acc, val_acc)
+                    trial.report(val_acc, epoch)
+                    val_metric_for_pruning = val_acc
                 
                 # Report intermediate value for pruning
-                trial.report(val_acc, epoch)
+                trial.report(val_metric_for_pruning, epoch)
                 
                 # Check if trial should be pruned
                 if trial.should_prune():
                     self.logger.info(f"Trial {trial.number} pruned at epoch {epoch}")
                     raise optuna.TrialPruned()
             
-            self.logger.info(f"Trial {trial.number} completed with val_acc={best_val_acc:.4f}")
-            return best_val_acc
+            if self.regression:
+                self.logger.info(f"Trial {trial.number} completed with val_rmse={best_val_rmse:.4f}")
+                return best_val_rmse
+            else:
+                self.logger.info(f"Trial {trial.number} completed with val_acc={best_val_acc:.4f}")
+                return best_val_acc
             
         except optuna.TrialPruned:
             raise
@@ -439,6 +472,7 @@ def objective_function(trial: Trial) -> float:
     val_df = study.user_attrs.get('val_df')
     feature_groups = study.user_attrs.get('feature_groups', ['ohlcv'])
     class_weights = study.user_attrs.get('class_weights')
+    regression = study.user_attrs.get('regression', False)
     sequence_length = study.user_attrs.get('sequence_length', 60)
     epochs = study.user_attrs.get('epochs', 20)
     device = study.user_attrs.get('device')
@@ -457,7 +491,8 @@ def objective_function(trial: Trial) -> float:
         class_weights=class_weights,
         sequence_length=sequence_length,
         epochs=epochs,
-        device=device
+        device=device,
+        regression=regression
     )
     
     return objective(trial)
@@ -473,7 +508,8 @@ def train_with_best_params(
     epochs: int = 50,
     checkpoint_dir: str = 'models/checkpoints/',
     log_dir: str = 'models/logs/',
-    device: Optional[str] = None
+    device: Optional[str] = None,
+    regression: bool = False
 ) -> Tuple[BGRUPredictor, Dict[str, list]]:
     """
     Train BGRU model with the best hyperparameters.
@@ -518,6 +554,7 @@ def train_with_best_params(
         dropout=dropout,
         device=device,
         feature_groups=feature_groups
+        ,regression=regression
     )
     
     # Train with best parameters
@@ -529,6 +566,7 @@ def train_with_best_params(
         lr=lr,
         sequence_length=sequence_length,
         class_weights=class_weights,
+        regression=regression,
         checkpoint_dir=checkpoint_dir,
         log_dir=log_dir
     )
@@ -590,7 +628,12 @@ def save_optimization_results(
     logger.info("OPTIMIZATION SUMMARY")
     logger.info("=" * 60)
     logger.info(f"Best trial: {study.best_trial.number}")
-    logger.info(f"Best value (val_acc): {study.best_value:.4f}")
+    # Best value depends on regression vs classification study direction and metric
+    best_metric_label = 'val_rmse' if study.direction == optuna.study.StudyDirection.MINIMIZE else 'val_acc'
+    try:
+        logger.info(f"Best value ({best_metric_label}): {study.best_value:.4f}")
+    except Exception:
+        logger.info(f"Best value: {study.best_value}")
     logger.info("Best hyperparameters:")
     for key, value in study.best_params.items():
         logger.info(f"  {key}: {value}")
@@ -607,7 +650,8 @@ def run_optimization(
     feature_groups: Optional[list] = None,
     output_dir: str = 'models/',
     checkpoint_dir: str = 'models/checkpoints/',
-    log_dir: str = 'models/logs/'
+    log_dir: str = 'models/logs/',
+    regression: bool = False
 ) -> optuna.Study:
     """
     Run the complete hyperparameter optimization pipeline.
@@ -662,11 +706,13 @@ def run_optimization(
         feature_groups = ['ohlcv']
     logger.info(f"Feature groups: {feature_groups}")
     
-    # Check class distribution and apply balancing if needed
-    class_weights = apply_class_balancing(train_df)
+    # Check class distribution and apply balancing if needed (only for classification)
+    class_weights = None
+    if not regression:
+        class_weights = apply_class_balancing(train_df)
     
     # Setup Optuna study
-    study = setup_optuna_study()
+    study = setup_optuna_study(regression=regression)
     
     # Create objective function
     objective = OptunaObjective(
@@ -675,11 +721,15 @@ def run_optimization(
         feature_groups=feature_groups,
         class_weights=class_weights,
         sequence_length=sequence_length,
+        regression=regression,
         epochs=epochs_per_trial
     )
     
     # Run optimization
     logger.info(f"\nStarting optimization with {n_trials} trials...")
+    # Save regression flag as study attribute
+    study.set_user_attr('regression', bool(regression))
+
     study.optimize(
         objective,
         n_trials=n_trials,
@@ -701,6 +751,8 @@ def run_optimization(
         epochs=final_epochs,
         checkpoint_dir=checkpoint_dir,
         log_dir=log_dir
+        ,
+        regression=regression
     )
     
     logger.info("=" * 60)
@@ -785,6 +837,11 @@ def main():
         default='models/logs/',
         help='Directory for logs (default: models/logs/)'
     )
+    parser.add_argument(
+        '--regression',
+        action='store_true',
+        help='Optimize regression task (minimize RMSE) instead of classification tasks (maximize accuracy)'
+    )
     
     args = parser.parse_args()
     
@@ -806,6 +863,7 @@ def main():
         output_dir=args.output_dir,
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir
+        ,regression=args.regression
     )
     
     return 0

@@ -601,7 +601,7 @@ class HybridBGRUModel:
         
         # Early stopping
         best_val_loss = float('inf')
-        patience = 10
+        patience = 20
         patience_counter = 0
         
         # Two-phase training
